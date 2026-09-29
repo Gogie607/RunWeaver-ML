@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "runweaver-ml"
+version = "0.1.2"
+description = "Standalone Runweaver ML framework package."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+authors = [
+  { name = "Runweaver-ML maintainers" }
+]
+dependencies = [
+  "numpy",
+  "scipy",
+  "torch",
+  "webdataset",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"runweaver_ml.dataset_management.docs" = ["*.md"]
