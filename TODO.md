@@ -36,7 +36,7 @@ Allowed status values are `Open`, `In progress`, `Blocked`, and `Complete`.
   - Tests cover conflicts and confirm the documented precedence.
   - Missing keys retain the intended behavior.
 - Completed: 2026-09-29
-- Commit/PR: Uncommitted local change
+- Commit/PR: `2092ce993204379e938ade35b258b670559b22a2`
 - Verification: `test_nested_parameter_lookup_preserves_layer_precedence`
 - Documentation updated: ARCHITECTURE.md
 - Notes: `has()` and `get()` now share one lookup implementation and preserve
@@ -61,7 +61,7 @@ Allowed status values are `Open`, `In progress`, `Blocked`, and `Complete`.
     `ObjectiveComposer` without a `TypeError`.
   - The payload ownership and metric-update flow are documented.
 - Completed: 2026-09-29
-- Commit/PR: Uncommitted local change
+- Commit/PR: `2092ce993204379e938ade35b258b670559b22a2`
 - Verification: Phase execution contract tests and full unittest suite
 - Documentation updated: README.md, ARCHITECTURE.md
 - Notes: Metric ownership is explicitly selected as `trainer` or `handlers`;
@@ -82,7 +82,7 @@ Allowed status values are `Open`, `In progress`, `Blocked`, and `Complete`.
     interface.
   - Any API removal includes an appropriate migration note.
 - Completed: 2026-09-29
-- Commit/PR: Uncommitted local change
+- Commit/PR: `2092ce993204379e938ade35b258b670559b22a2`
 - Verification: Public import and full unittest suite
 - Documentation updated: README.md, ARCHITECTURE.md
 - Notes: Removed the nonfunctional `run()` scaffold. Applications assemble
@@ -102,7 +102,7 @@ Allowed status values are `Open`, `In progress`, `Blocked`, and `Complete`.
   - Tests assert the intended cleanup behavior when an exception occurs.
   - Return-step and exception semantics remain explicit.
 - Completed: 2026-09-29
-- Commit/PR: Uncommitted local change
+- Commit/PR: `2092ce993204379e938ade35b258b670559b22a2`
 - Verification: Success and exception lifecycle tests
 - Documentation updated: ARCHITECTURE.md
 - Notes: `on_train_end()` now runs in `finally` after training begins.
