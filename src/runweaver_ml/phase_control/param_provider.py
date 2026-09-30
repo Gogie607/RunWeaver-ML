@@ -23,24 +23,27 @@ class ParamProvider:
         self.registry = registry
 
     def has(self, key):
-        return (
-            (self.registry.has(key)) or
-            key in self.run or
-            key in self.global_cfg or
-            key in self.runtime
-        )
+        found, _ = self._lookup(key)
+        return found
 
     def get(self, key):
+        found, value = self._lookup(key)
+        return value if found else None
+
+    def _lookup(self, key):
         # dynamic (scheduled)
         if self.registry.has(key):
-            return self.registry.get(key)
+            return True, self.registry.get(key)
 
         # static layers
         for src in (self.run, self.global_cfg, self.runtime):
             if key in src:
-                return src[key]
-        # one-level nested lookup (your runtime case)
-        for v in src.values():
-            if isinstance(v, dict) and key in v:
-                return v[key]
-        return None
+                return True, src[key]
+
+        # one-level nested lookup, preserving layer precedence
+        for src in (self.run, self.global_cfg, self.runtime):
+            for value in src.values():
+                if isinstance(value, dict) and key in value:
+                    return True, value[key]
+
+        return False, None

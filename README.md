@@ -161,10 +161,16 @@ is managed through `train_context()` and `eval_context()`. `TrainingModule`
 advances scheduled parameters at the beginning of every step and supplies
 logging, validation, and checkpoint hooks.
 
-`PhaseOrchestrator.run()` is currently a scaffold and does not execute phases.
-Applications must use the static epoch methods directly. The current loop is
-PyTorch-oriented, uses CUDA AMP only when CUDA is available, and expects model
-checkpoint behavior to be supplied by the application.
+Applications assemble each phase and call the static epoch methods directly.
+Steps and parameter schedules are local to each call. The current loop is
+PyTorch-oriented and uses CUDA AMP only when CUDA is available. Checkpointing
+is optional and supplied as a callback when constructing `TrainingModule`;
+RunWeaver does not prescribe model or training-session persistence.
+
+Validation metric ownership is explicit. A module may use its metric and
+collector handlers, or set `validation_owner="trainer"` when its trainer
+implements `reset_metrics()`, `update_metrics(payload)`, and
+`report_metrics()`.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for component responsibilities and data
 flow. Review [TODO.md](TODO.md) for known discrepancies, acceptance criteria,
@@ -189,7 +195,7 @@ This is an early research framework (`0.1.x`), not a stable public API. Areas
 that remain intentionally application-owned or incomplete include:
 
 - constructing a full run from configuration;
-- implementing `PhaseOrchestrator.run()`;
+- application-level phase assembly;
 - model, optimizer, logger, and checkpoint construction;
 - built-in artifact/provider implementations (the framework supplies their
   extension contracts and registries); and

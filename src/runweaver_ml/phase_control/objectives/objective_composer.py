@@ -1,19 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable
-
-from torch import Tensor
-
+from typing import Callable, Iterable
 
 from .training_context import TrainingContext
 from .training_objective import TrainingObjective
 
-from ..execution.training_model_wrapper_base import system_state
+from ..execution.training_model_wrapper_base import TrainingModelProtocol
 
 from ..execution.phase_trainer_base import TrainerBase
 
-ForwardStrategy = Callable[[TrainingContext], TrainingContext]
+ForwardStrategy = Callable[
+    [TrainingContext, TrainingModelProtocol],
+    TrainingContext,
+]
 
 
 class ObjectiveComposer(TrainerBase):
@@ -22,7 +22,7 @@ class ObjectiveComposer(TrainerBase):
     def __init__(
         self,
         model,
-        forward, #: ForwardStrategy,
+        forward: ForwardStrategy,
         objectives: Iterable[TrainingObjective],
         train_mode,
         eval_mode
@@ -32,7 +32,7 @@ class ObjectiveComposer(TrainerBase):
         )
 
         self.forward = forward
-        self.objectives = objectives
+        self.objectives = tuple(objectives)
         self.last_total_loss = 0.0
 
         if not self.objectives:

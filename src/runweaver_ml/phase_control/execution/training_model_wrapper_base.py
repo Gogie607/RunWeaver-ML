@@ -1,15 +1,19 @@
 """Model wrapper interface required by phase-control execution."""
 
 from contextlib import contextmanager
-from typing import Any
+from collections.abc import Iterable
+from typing import Any, Protocol, runtime_checkable
+
+from torch.nn import Parameter
 
 
-class TrainingModelWrapperBase:
-    """Interface for external AI model encapsulations used by trainers.
+@runtime_checkable
+class TrainingModelProtocol(Protocol):
+    """Capabilities required by phase-control execution.
 
-    Implementations are expected to expose structured mode and trainability
-    state so phase-control code can temporarily switch execution state without
-    knowing model internals.
+    Concrete model construction, serialization, and persistence remain owned by
+    the application. Implementations satisfy this protocol structurally and do
+    not need to inherit from a RunWeaver class.
     """
 
     def get_mode(self) -> Any:
@@ -24,12 +28,19 @@ class TrainingModelWrapperBase:
     def set_trainable(self, state: Any):
         ...
 
+    def trainable_parameters(self) -> Iterable[Parameter]:
+        ...
+
     def to(self, device):
-        return self
+        ...
+
+
+# Compatibility alias for applications that imported the former nominal name.
+TrainingModelWrapperBase = TrainingModelProtocol
 
 
 @contextmanager
-def system_state(system: TrainingModelWrapperBase, new_mode):
+def system_state(system: TrainingModelProtocol, new_mode):
     """Temporarily switch a wrapped model to ``new_mode``."""
     mode = system.get_mode()
     try:
@@ -40,7 +51,7 @@ def system_state(system: TrainingModelWrapperBase, new_mode):
 
 
 @contextmanager
-def system_trainable(system: TrainingModelWrapperBase, trainables):
+def system_trainable(system: TrainingModelProtocol, trainables):
     """Temporarily restrict trainable leaves on a wrapped model."""
     old = system.get_trainable()
 

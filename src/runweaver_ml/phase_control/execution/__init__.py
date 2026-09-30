@@ -5,6 +5,7 @@ from .phase_metric_base import MetricHandlerBase
 from .phase_trainer_base import TrainerBase
 from .phase_training_module import TrainingModule
 from .training_model_wrapper_base import (
+    TrainingModelProtocol,
     TrainingModelWrapperBase,
     apply_trainable,
     clear_trainable,
@@ -18,6 +19,7 @@ __all__ = [
     "MetricHandlerBase",
     "TrainerBase",
     "TrainingModelWrapperBase",
+    "TrainingModelProtocol",
     "TrainingModule",
     "apply_trainable",
     "clear_trainable",

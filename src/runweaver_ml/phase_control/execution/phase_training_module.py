@@ -1,23 +1,50 @@
-from abc import ABC, abstractmethod
+from collections.abc import Callable
+from typing import Literal
+
 from .phase_metric_base import MetricHandlerBase as NullMetrics
 from .phase_collector_base import CollectorBase as NullCollector
 
-class TrainingModule(ABC):
+ValidationOwner = Literal["trainer", "handlers"]
+
+
+class TrainingModule:
 
     def __init__(
             self,
             trainer,
             params,
             *,
-            metrics=NullMetrics(),
-            collector=NullCollector()
+            metrics=None,
+            collector=None,
+            validation_owner: ValidationOwner = "handlers",
+            checkpoint_handler: Callable | None = None,
     ):
 
         self.trainer = trainer
         self.params = params
 
-        self.metrics = metrics
-        self.collector = collector
+        if validation_owner not in {"trainer", "handlers"}:
+            raise ValueError(
+                "validation_owner must be 'trainer' or 'handlers'"
+            )
+
+        if validation_owner == "trainer":
+            required = ("reset_metrics", "update_metrics", "report_metrics")
+            missing = [
+                name
+                for name in required
+                if not callable(getattr(trainer, name, None))
+            ]
+            if missing:
+                raise TypeError(
+                    "trainer-owned validation requires methods: "
+                    + ", ".join(missing)
+                )
+
+        self.validation_owner = validation_owner
+        self.metrics = metrics if metrics is not None else NullMetrics()
+        self.collector = collector if collector is not None else NullCollector()
+        self.checkpoint_handler = checkpoint_handler
         self._step = 0
 
     @property
@@ -57,14 +84,11 @@ class TrainingModule(ABC):
             optimizer,
             scheduler = None
     ):
-        ckpt = self.params.get("checkpoint")
-        ckpt_dir = ckpt.get("dir")
-        if ckpt_dir is not None:
-            self.trainer.model.save_checkpoint(
-                ckpt_dir,
-                self.current_step,
-                optimizer= optimizer,
-                scheduler=scheduler
+        if self.checkpoint_handler is not None:
+            self.checkpoint_handler(
+                self,
+                optimizer,
+                scheduler,
             )
 
     #---------------------------------------------
@@ -84,49 +108,38 @@ class TrainingModule(ABC):
     #---------------------------------------------
     def on_validation_begin(self,  step):
 
-        if hasattr(self.trainer, "reset_metrics"):
+        if self.validation_owner == "trainer":
             self.trainer.reset_metrics()
             return
 
-        if self.metrics:
-            self.metrics.reset()
+        self.metrics.begin(self.params)
 
-        if self.collector:
-            self.collector.begin(
-                self.params,
-                step
-            )
+        self.collector.begin(
+            self.params,
+            step
+        )
 
     #---------------------------------------------
     def on_validation_payload(self, payload):
 
-        if hasattr(payload, "update_metrics"):
-            payload.update_metrics(payload)
+        if self.validation_owner == "trainer":
+            self.trainer.update_metrics(payload)
             return
 
-        if self.metrics:
-            self.metrics.update(payload)
-
-        if self.collector:
-            self.collector.update(payload)
+        self.metrics.update(payload)
+        self.collector.update(payload)
 
     #---------------------------------------------
     def on_validation_end(self):
 
-        if hasattr(
-                self.trainer,
-                "report_metrics",
-        ):
+        if self.validation_owner == "trainer":
             return self.trainer.report_metrics()
 
-        summary = None
-        if self.metrics:
-            summary = self.metrics.summarize()
+        summary = self.metrics.summarize()
 
-            if hasattr(self.metrics, "report"):
-                summary = self.metrics.report(summary)
+        if hasattr(self.metrics, "report"):
+            summary = self.metrics.report(summary)
 
-        if self.collector:
-            self.collector.finalize()
+        self.collector.finalize()
 
         return summary

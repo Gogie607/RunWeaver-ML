@@ -1,42 +1,11 @@
 
 import torch
 
-from  .train_loop_config import TrainLoopConfig, AmpSettings
+from .train_loop_config import TrainLoopConfig
 
 from .execution import TrainingModule
 
 class PhaseOrchestrator:
-
-    def __init__(self, model):
-        self.model = model
-
-    def run(self, phases):
-        for i, ph in enumerate(phases):
-            print(f"\n=== Phase {i}: {ph['name']} ===\n")
-
-            #self._apply_model_freeze(ph.get("model", {}))
-            #self._configure_optim(ph.get("optimizer", {}))
-            #loader = self._configure_loader(ph.get("data", {}))
-
-            # build a *phase-local* training spec (full, not delta)
-            #train_spec = {
-            #    "loss": ph["loss"],
-            #    "steps": ph["steps"],
-            #    "name": ph["name"],
-            #}
-            # TODO define how to use if possible
-            # run your existing loop unchanged
-            #train_loop(
-            #    model=self.model,
-            #    loader=loader,
-            #    optimizer=self.optimizer,
-            #    scheduler=self.scheduler,
-            #    spec=train_spec,
-            #    start_step=self.global_step,
-            #    device=self.device,
-            #)
-
-            #self.global_step += ph["steps"]
 
     @staticmethod
     def train_epoch(
@@ -47,98 +16,92 @@ class PhaseOrchestrator:
             val_loader=None,
             *,
             logger=None,
-            start_step=0,
             scheduler = None,
     ):
 
-        step = start_step
+        step = 0
 
         trainer.on_train_begin()
+        try:
+            use_scaler = loop_config.amp.use_scaler
+            scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
 
+            with trainer.train_context():
+                for batch in train_loader:
+                    if (
+                        loop_config.max_steps is not None
+                        and step >= loop_config.max_steps
+                    ):
+                        break
 
-        use_scaler = loop_config.amp.use_scaler
+                    step += 1
+                    optimizer.zero_grad(set_to_none=True)
 
-        scaler = torch.amp.GradScaler('cuda',enabled=use_scaler)
+                    with torch.amp.autocast(
+                            'cuda',
+                            enabled=loop_config.amp.enabled,
+                            dtype=loop_config.amp.dtype,
+                    ):
+                        trainer.on_step_begin(step)
+                        loss, payload = trainer.compute(batch)
 
-        with (trainer.train_context() as tc):
+                    if use_scaler:
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        loss.backward()
+                        optimizer.step()
 
-            for batch in train_loader:
-                step += 1
+                    if scheduler is not None:
+                        scheduler.step()
 
-                #params.step(step)
+                    trainer.on_train_payload(payload)
 
-                optimizer.zero_grad(set_to_none=True)
+                    if (
+                        loop_config.log_every is not None
+                        and step % loop_config.log_every == 0
+                        and logger
+                    ):
+                        logger.log(
+                            tag="train_step",
+                            step=step,
+                            data=[
+                                trainer.on_log(payload),
+                                f" LR: {optimizer.param_groups[0]['lr']:.2e}",
+                            ],
+                        )
 
-                with torch.amp.autocast(
-                        'cuda',
-                        enabled=loop_config.amp.enabled,
-                        dtype=loop_config.amp.dtype,
-                ):
-                    trainer.on_step_begin(step)
-                    loss, payload = trainer.compute(batch)
-
-                if use_scaler:
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    loss.backward()
-                    optimizer.step()
-
-                if scheduler is not None:
-                    scheduler.step()
-
-                trainer.on_train_payload(payload)
-
-                if ( loop_config.log_every is not None
-                     and step %  loop_config.log_every == 0
-                ):
-                    try:
-                        if logger:
-                            logger.log(
-                                tag="train_step",
-                                step=step,
-                                data= [trainer.on_log(payload),
-                                       f" LR: {optimizer.param_groups[0]['lr']:.2e}"]
-                            )
-                    except TypeError as e:
-                        print(f"Logger returned a Type error: {e}")
-
-
-                # ---- validation hook ----
-                if (
+                    if (
                         loop_config.validate_every is not None
                         and val_loader is not None
                         and step % loop_config.validate_every == 0
-                ):
-                    if logger:
-                        logger.flush()
+                    ):
+                        if logger:
+                            logger.flush()
 
-                    trainer.on_validation_begin( step)
-
-                    metric_obj = PhaseOrchestrator.validate_epoch(
-                        trainer,
-                        loop_config,
-                        val_loader
-                    )
-
-                    if logger:
-                        logger.log(
-                            tag="validation",
+                        metric_obj = PhaseOrchestrator.validate_epoch(
+                            trainer,
+                            loop_config,
+                            val_loader,
                             step=step,
-                            data= metric_obj
                         )
-                        logger.flush()
 
-                if (  loop_config.save_every is not None
-                    and (step % loop_config.save_every) == 0
-                ):
-                    trainer.on_checkpoint( optimizer, scheduler)
+                        if logger:
+                            logger.log(
+                                tag="validation",
+                                step=step,
+                                data=metric_obj,
+                            )
+                            logger.flush()
 
-                if ( loop_config.max_steps is not None
-                    and step >= loop_config.max_steps
-                ):
-                    break
+                    if (
+                        loop_config.save_every is not None
+                        and step % loop_config.save_every == 0
+                    ):
+                        trainer.on_checkpoint(optimizer, scheduler)
+        finally:
+            trainer.on_train_end()
 
         return step
 
@@ -148,10 +111,14 @@ class PhaseOrchestrator:
     def validate_epoch(
             trainer : TrainingModule,
             loop_config : TrainLoopConfig,
-            loader
+            loader,
+            *,
+            step: int = 0,
     ) ->dict:
 
-        with trainer.eval_context()as tc:
+        trainer.on_validation_begin(step)
+
+        with trainer.eval_context():
 
             for local_step, batch in enumerate(loader):
                 if loop_config.validate_max_steps is not None and local_step >= loop_config.validate_max_steps:
@@ -169,4 +136,3 @@ class PhaseOrchestrator:
 
         summary = trainer.on_validation_end()
         return summary
-

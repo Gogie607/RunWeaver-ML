@@ -31,7 +31,7 @@ class TrainingObjective(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def update_metrics(self):
+    def update_metrics(self, payload):
         raise NotImplementedError
 
     @abstractmethod

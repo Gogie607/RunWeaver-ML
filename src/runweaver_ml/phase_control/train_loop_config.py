@@ -53,11 +53,24 @@ class TrainLoopConfig:
     ) -> "TrainLoopConfig":
         schedule = runtime_config.get("schedule", {})
 
+        values = {
+            "max_steps": max_steps,
+            "validate_every": schedule.get("validate_every"),
+            "validate_max_steps": schedule.get("validate_max_steps"),
+            "save_every": schedule.get("save_every"),
+            "log_every": schedule.get("log_every"),
+        }
+        for name, value in values.items():
+            if value is not None and value < 0:
+                raise ValueError(f"{name} must be non-negative or None")
+            if name != "max_steps" and value == 0:
+                raise ValueError(f"{name} must be positive or None")
+
         return cls(
-            max_steps=max_steps,
-            validate_every=schedule.get("validate_every"),
-            validate_max_steps=schedule.get("validate_max_steps"),
-            save_every=schedule.get("save_every"),
-            log_every=schedule.get("log_every"),
+            max_steps=values["max_steps"],
+            validate_every=values["validate_every"],
+            validate_max_steps=values["validate_max_steps"],
+            save_every=values["save_every"],
+            log_every=values["log_every"],
             amp=AmpSettings.from_config(runtime_config.get("amp")),
         )

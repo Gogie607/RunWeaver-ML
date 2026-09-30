@@ -151,10 +151,15 @@ architecture.
 `validate_epoch()` runs computation without gradients in the trainer's
 evaluation context and returns the module's validation summary.
 
-`PhaseOrchestrator.run()` is currently a non-executing scaffold. Run-level
-construction remains application-owned and callers must invoke the static loop
-methods directly. This limitation should remain visible until a generic run
-contract is designed and implemented.
+Run-level construction remains application-owned and callers invoke the static
+loop methods with an already prepared trainer, optimizer, and loaders. Loop
+steps and target schedules are phase-local. This keeps dataset selection,
+optimizer policy, and concrete model construction outside RunWeaver.
+
+Validation ownership is selected when constructing `TrainingModule`: either
+the trainer implements the complete metric lifecycle or the module uses its
+metric and collector handlers. Checkpoint persistence is likewise an injected
+callback rather than a model-wrapper requirement.
 
 ## Dataset management
 
@@ -249,7 +254,7 @@ actual implemented schema and should be exercised by tests when practical.
 ## Known architectural limitations
 
 - The public API is not yet versioned independently from the package release.
-- Run-level orchestration is incomplete.
+- Run-level orchestration is intentionally application-owned.
 - Phase-control behavior has limited automated test coverage.
 - Some contracts are abstract base classes while others remain behavioral
   conventions; protocol typing has not been standardized.
@@ -270,7 +275,7 @@ actual implemented schema and should be exercised by tests when practical.
 6. Fail clearly when synchronized data or required capabilities are missing.
 7. Add tests before changing transport identity, schedule, or lifecycle
    semantics.
-8. Do not promote the placeholder run orchestrator as a working interface.
+8. Keep application construction outside the phase loop.
 
 ## Verification strategy
 

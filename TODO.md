@@ -23,7 +23,7 @@ Allowed status values are `Open`, `In progress`, `Blocked`, and `Complete`.
 
 ### TODO-001 — Correct nested parameter lookup
 
-- Status: Open
+- Status: Complete
 - Affected code: `src/runweaver_ml/phase_control/param_provider.py`
 - Discrepancy: `ParamProvider.get()` checks top-level values in `run`,
   `global_cfg`, and `runtime`, but its one-level nested lookup only examines the
@@ -35,15 +35,16 @@ Allowed status values are `Open`, `In progress`, `Blocked`, and `Complete`.
   - Tests cover top-level and nested lookup in all three configuration layers.
   - Tests cover conflicts and confirm the documented precedence.
   - Missing keys retain the intended behavior.
-- Completed:
-- Commit/PR:
-- Verification:
-- Documentation updated:
-- Notes:
+- Completed: 2026-09-29
+- Commit/PR: Uncommitted local change
+- Verification: `test_nested_parameter_lookup_preserves_layer_precedence`
+- Documentation updated: ARCHITECTURE.md
+- Notes: `has()` and `get()` now share one lookup implementation and preserve
+  run, global, then runtime precedence for nested values.
 
 ### TODO-002 — Align the objective metrics contract
 
-- Status: Open
+- Status: Complete
 - Affected code:
   - `src/runweaver_ml/phase_control/objectives/training_objective.py`
   - `src/runweaver_ml/phase_control/objectives/objective_composer.py`
@@ -59,15 +60,16 @@ Allowed status values are `Open`, `In progress`, `Blocked`, and `Complete`.
   - Validation tests exercise an objective through `TrainingModule` and
     `ObjectiveComposer` without a `TypeError`.
   - The payload ownership and metric-update flow are documented.
-- Completed:
-- Commit/PR:
-- Verification:
-- Documentation updated:
-- Notes:
+- Completed: 2026-09-29
+- Commit/PR: Uncommitted local change
+- Verification: Phase execution contract tests and full unittest suite
+- Documentation updated: README.md, ARCHITECTURE.md
+- Notes: Metric ownership is explicitly selected as `trainer` or `handlers`;
+  objective metric updates consistently accept a payload.
 
 ### TODO-003 — Complete or remove `PhaseOrchestrator.run()`
 
-- Status: Open
+- Status: Complete
 - Affected code: `src/runweaver_ml/phase_control/phase_orchestrator.py`
 - Discrepancy: `PhaseOrchestrator.run()` prints phase headings but performs no
   orchestration. Its name suggests a working high-level entry point.
@@ -79,15 +81,16 @@ Allowed status values are `Open`, `In progress`, `Blocked`, and `Complete`.
   - Public documentation no longer describes a placeholder as an executable
     interface.
   - Any API removal includes an appropriate migration note.
-- Completed:
-- Commit/PR:
-- Verification:
-- Documentation updated:
-- Notes:
+- Completed: 2026-09-29
+- Commit/PR: Uncommitted local change
+- Verification: Public import and full unittest suite
+- Documentation updated: README.md, ARCHITECTURE.md
+- Notes: Removed the nonfunctional `run()` scaffold. Applications assemble
+  phases and invoke the static loop methods.
 
 ### TODO-004 — Complete the training lifecycle
 
-- Status: Open
+- Status: Complete
 - Affected code: `src/runweaver_ml/phase_control/phase_orchestrator.py`
 - Discrepancy: `train_epoch()` calls `trainer.on_train_begin()` but never calls
   `trainer.on_train_end()`. Cleanup is also not protected if computation,
@@ -98,17 +101,17 @@ Allowed status values are `Open`, `In progress`, `Blocked`, and `Complete`.
   - Tests assert lifecycle ordering for successful execution.
   - Tests assert the intended cleanup behavior when an exception occurs.
   - Return-step and exception semantics remain explicit.
-- Completed:
-- Commit/PR:
-- Verification:
-- Documentation updated:
-- Notes:
+- Completed: 2026-09-29
+- Commit/PR: Uncommitted local change
+- Verification: Success and exception lifecycle tests
+- Documentation updated: ARCHITECTURE.md
+- Notes: `on_train_end()` now runs in `finally` after training begins.
 
 ## Testing and release readiness
 
 ### TODO-005 — Add phase-control unit and integration coverage
 
-- Status: Open
+- Status: In progress
 - Affected code: `src/runweaver_ml/phase_control/`, `tests/`
 - Discrepancy: Existing automated coverage is concentrated on the dataset tar
   transport/layout boundary. Parameter scheduling, lifecycle hooks, objective

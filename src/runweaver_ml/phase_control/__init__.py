@@ -4,6 +4,7 @@ from .execution import (
     CollectorBase,
     MetricHandlerBase,
     TrainerBase,
+    TrainingModelProtocol,
     TrainingModelWrapperBase,
     TrainingModule,
     system_state
@@ -40,6 +41,7 @@ __all__ = [
     "TrainingObjective",
     "TrainerBase",
     "TrainingModelWrapperBase",
+    "TrainingModelProtocol",
     "TrainingModule",
     "system_state",
     "build_schedule_block",
