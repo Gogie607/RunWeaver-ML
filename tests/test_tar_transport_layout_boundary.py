@@ -184,6 +184,94 @@ class TarTransportLayoutBoundaryTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Missing synchronized sample"):
                 list(view)
 
+    def test_explicit_anchor_allows_sparse_modality_overlay(self):
+        with self.tmp_dir() as root:
+            full_dir = root / "a_full"
+            sparse_dir = root / "z_sparse"
+            full_dir.mkdir()
+            sparse_dir.mkdir()
+
+            _write_tar(
+                full_dir / "000.tar",
+                {
+                    "s1": {"text.txt": _txt_bytes("one")},
+                    "s2": {"text.txt": _txt_bytes("two")},
+                },
+            )
+            _write_tar(
+                sparse_dir / "000.tar",
+                {"s2": {"response.txt": _txt_bytes("answer")}},
+            )
+
+            source = _build_source(
+                _build_layout(root),
+                ["text", "response"],
+                op_params=LayoutOpParams(anchor_modality="response"),
+            )
+
+            samples = list(DatasetView(source))
+
+            self.assertEqual(
+                samples,
+                [
+                    {
+                        "sample_id": "s2",
+                        "__shard__": "000.tar",
+                        "domain": "test-domain",
+                        "text": "two",
+                        "response": "answer",
+                    }
+                ],
+            )
+
+    def test_default_anchor_preserves_manifest_order(self):
+        with self.tmp_dir() as root:
+            full_dir = root / "a_full"
+            sparse_dir = root / "z_sparse"
+            full_dir.mkdir()
+            sparse_dir.mkdir()
+
+            _write_tar(
+                full_dir / "000.tar",
+                {
+                    "s1": {"text.txt": _txt_bytes("one")},
+                    "s2": {"text.txt": _txt_bytes("two")},
+                },
+            )
+            _write_tar(
+                sparse_dir / "000.tar",
+                {"s2": {"response.txt": _txt_bytes("answer")}},
+            )
+
+            view = DatasetView(
+                _build_source(
+                    _build_layout(root),
+                    ["text", "response"],
+                )
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "Missing synchronized sample"):
+                list(view)
+
+    def test_anchor_modality_must_be_requested(self):
+        with self.tmp_dir() as root:
+            text_dir = root / "text"
+            text_dir.mkdir()
+            _write_tar(
+                text_dir / "000.tar",
+                {"s1": {"text.txt": _txt_bytes("hello")}},
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "anchor modality must be part of the required contract",
+            ):
+                _build_source(
+                    _build_layout(root),
+                    ["text"],
+                    op_params=LayoutOpParams(anchor_modality="response"),
+                )
+
     def test_requested_deliverables_restrict_loaded_modalities(self):
         with self.tmp_dir() as root:
             text_dir = root / "text"

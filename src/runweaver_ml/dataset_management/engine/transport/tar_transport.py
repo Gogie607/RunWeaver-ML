@@ -32,8 +32,13 @@ class TarTransport(TransportBase):
             deliverables,
             load_policy,
             shardshuffle=False,
+            anchor_modality=None,
     ):
         shard_names = list(self.manifest.shard_names)
+        fragments = self._ordered_active_fragments(
+            deliverables=deliverables,
+            anchor_modality=anchor_modality,
+        )
 
         if shardshuffle:
             random.shuffle(shard_names)
@@ -43,7 +48,55 @@ class TarTransport(TransportBase):
                 shard_name=shard_name,
                 deliverables=deliverables,
                 load_policy=load_policy,
+                fragments=fragments,
             )
+
+    # -------------------------------------------------
+    def _ordered_active_fragments(
+            self,
+            deliverables,
+            anchor_modality=None,
+    ):
+        deliverables = set(deliverables or [])
+        fragments = [
+            fragment
+            for fragment in self.manifest.fragments
+            if set(fragment.modalities) & deliverables
+        ]
+
+        if anchor_modality is None:
+            return fragments
+
+        if anchor_modality not in deliverables:
+            raise ValueError(
+                "Tar transport anchor modality must be one of the requested "
+                f"deliverables: '{anchor_modality}'."
+            )
+
+        anchor_fragments = [
+            fragment
+            for fragment in fragments
+            if anchor_modality in fragment.modalities
+        ]
+
+        if not anchor_fragments:
+            raise ValueError(
+                "Tar transport anchor modality is not available in an active "
+                f"fragment: '{anchor_modality}'."
+            )
+
+        if len(anchor_fragments) > 1:
+            fragment_ids = [fragment.id for fragment in anchor_fragments]
+            raise RuntimeError(
+                "Tar transport anchor modality must identify exactly one "
+                f"fragment. '{anchor_modality}' occurs in {fragment_ids}."
+            )
+
+        anchor = anchor_fragments[0]
+        return [anchor] + [
+            fragment for fragment in fragments
+            if fragment is not anchor
+        ]
 
     #-----------------------------------
     def _iter_source_shard(
@@ -69,12 +122,14 @@ class TarTransport(TransportBase):
             self,
             shard_name:str,
             deliverables,
-            load_policy
+            load_policy,
+            fragments,
     ):
         source_maps = self._read_shard_by_key(
             shard_name,
             deliverables,
             load_policy,
+            fragments,
         )
 
         if not source_maps:
@@ -115,7 +170,8 @@ class TarTransport(TransportBase):
             self,
             shard_name:str,
             deliverables,
-            load_policy
+            load_policy,
+            fragments=None,
     ):
         source_maps = []
 
@@ -137,7 +193,11 @@ class TarTransport(TransportBase):
             )
 
 
-        for fragment in self.manifest.fragments:
+        for fragment in (
+            self.manifest.fragments
+            if fragments is None
+            else fragments
+        ):
 
             fragment_deliverables = (
                 set(fragment.modalities.keys())

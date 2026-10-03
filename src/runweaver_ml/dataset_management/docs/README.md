@@ -220,8 +220,14 @@ validation:
 
   batch_size: 16
 
-  shuffle: false
-  shardshuffle: false
+  op_params:
+    layout:
+      shuffle: false
+      shardshuffle: false
+      # Optional. Selects which requested modality defines the sample key set
+      # when synchronizing fragments. Useful for sparse modality overlays.
+      # If omitted, fragment discovery order is preserved for compatibility.
+      anchor_modality: assistant_response
 
   mix_mode: per_domain
   exhaust_policy: finite

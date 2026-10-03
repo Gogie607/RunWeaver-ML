@@ -16,6 +16,7 @@ class TransportBase(ABC):
         deliverables,
         load_policy,
         shardshuffle=False,
+        anchor_modality=None,
     ):
         pass
 

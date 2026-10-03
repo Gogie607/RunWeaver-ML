@@ -18,6 +18,7 @@ class LayoutOpParams:
     shuffle: bool = False
     shardshuffle: bool = False
     shuffle_buffer: int = 1000
+    anchor_modality: str | None = None
 
 
 #-------------------------------------------
@@ -60,6 +61,15 @@ class LayoutSource(IteratableRootBase):
                 f"Data source cannot satisfy its required contract: {missing}"
             )
         self._deliverables = list(dict.fromkeys(contract))
+
+        if (
+            self.op_params.anchor_modality is not None
+            and self.op_params.anchor_modality not in self._deliverables
+        ):
+            raise ValueError(
+                "Layout anchor modality must be part of the required "
+                f"contract: '{self.op_params.anchor_modality}'."
+            )
 
     # -------------------------------------------------
     def _decode_sample(self,
@@ -170,6 +180,7 @@ class LayoutSource(IteratableRootBase):
             deliverables=self._deliverables,
             load_policy=self.load_policy,
             shardshuffle=self.op_params.shardshuffle,
+            anchor_modality=self.op_params.anchor_modality,
         )
 
         if self.op_params.shuffle:
