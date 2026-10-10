@@ -1,85 +1,139 @@
-# Runweaver ML
+# RunWeaver ML
 
-Runweaver ML is a small, model-agnostic Python framework for experimental
-machine-learning workflows. It provides two cooperating subsystems:
+**Build the training workflow you need. Keep the framework out of your research decisions.**
 
-- phase-oriented training and validation utilities; and
-- streaming, multimodal datasets backed by aligned tar shards.
+RunWeaver ML is a lightweight, model-agnostic Python framework for experimental machine learning. It separates two recurring engineering problems from the experiments themselves:
 
-The package was extracted from a larger research application. It is usable as a
-standalone library, but its public API is still evolving and it does not yet
-provide a complete application-level training runner.
+- **Phase Control:** coordinate multi-phase training, scheduled parameters, objectives, validation, and the training loop.
+- **Dataset Management (DSM):** connect storage to a reusable pipeline for decoding, providers, artifacts, prefetching, dataset mixing, and PyTorch batching.
 
-## Requirements
+**Use either subsystem independently, or use them together.** RunWeaver does not require a particular model, experiment layout, or storage format.
 
-- Python 3.10 or newer
-- NumPy
-- SciPy
-- PyTorch
-- WebDataset
+> **Bring your own storage backend. Keep the RunWeaver processing pipeline.**
 
-Runweaver ML is licensed under the GNU General Public License v3.0 or later.
-See [LICENSE](LICENSE) for the license notice and terms.
+RunWeaver began as infrastructure extracted from a research application. It remains an evolving `0.1.x` library, not a turnkey experiment runner or a frozen public API.
 
-## Installation
+## Why RunWeaver?
 
-Create and activate a virtual environment, then install the project in editable
-mode:
+Research code changes faster than infrastructure should. A new model might need a different objective, a training phase might freeze different components, or a dataset might move from TAR archives to a database. None of those decisions should require rewriting the entire training or input pipeline.
+
+RunWeaver supplies the reusable machinery while **your application owns the experiment**.
+
+| Your challenge | RunWeaver provides | You decide |
+| --- | --- | --- |
+| Training in distinct stages | Phase descriptions, scheduled targets, execution loops | Models, trainable components, phase assembly |
+| Combining loss functions | Objective composition and shared batch context | Forward passes and loss definitions |
+| Serving multimodal samples | Transport boundary, decoding, providers, prefetch, batching | Data source, modality meanings, transformations |
+| Mixing datasets | Per-domain or weighted mixed iteration | Dataset selection, bias, exhaustion policy |
+| Integrating into an existing project | Explicit Python construction and extension points | Configuration format, logging, checkpoints |
+
+### Two systems, no forced marriage
+
+```text
+                         Your research application
+                        /                         \
+                       v                           v
+              PHASE CONTROL                  DATASET MANAGEMENT
+           phases · schedules             storage transport · decoding
+           trainers · objectives          providers · artifacts · prefetch
+           train/validate loops           mixing · collator · DataLoader
+                       \                           /
+                        \____ optional integration _/
+```
+
+Phase Control works with loaders supplied by your application, whether or not they came from DSM. DSM produces batches usable by your own training code, whether or not you use Phase Control.
+
+## Install
+
+Requires **Python 3.10+**. Declared dependencies include PyTorch, NumPy, SciPy, and WebDataset.
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
+git clone https://github.com/Gogie607/RunWeaver-ML.git
+cd RunWeaver-ML
 python -m pip install -e .
 ```
 
-For a regular, non-editable installation, use `python -m pip install .`.
+For a non-editable local installation, use `python -m pip install .`.
 
-## Package overview
+## Quick start: data without TAR files
 
-```text
-src/runweaver_ml/
-├── phase_control/       phase definitions, schedules, objectives, and loops
-├── dataset_management/ tar discovery, decoding, views, mixing, and batching
-└── utils/               timing helpers
-```
-
-Frequently used imports are exposed by their owning subpackage:
+The simplest demonstration uses `MemoryTransport`, which delivers native Python values through the same DSM pipeline as a storage-backed dataset.
 
 ```python
-from runweaver_ml.phase_control import (
-    PhaseOrchestrator,
-    TrainLoopConfig,
-    TrainingModule,
-)
 from runweaver_ml.dataset_management import (
+    MemoryTransport,
     MultimodalDataset,
-    build_dataset_and_loader,
+    create_loader,
 )
+
+transport = MemoryTransport([
+    {"__key__": "a", "text": "hello", "label": 1},
+    {"__key__": "b", "text": "world", "label": 0},
+])
+
+dataset = MultimodalDataset(
+    transport=transport,
+    domain="demo",
+    requires=["text", "label"],
+)
+
+loader = create_loader(dataset, ["text", "label"], batch_size=2)
+
+for batch in loader:
+    print(batch["sample_id"], batch["text"], batch["label"])
 ```
 
-The top-level `runweaver_ml` package currently exposes only `__version__`.
+No fabricated shard names, directory structure, or TAR files are needed. The transport supplies samples; RunWeaver handles the downstream pipeline.
 
-## Dataset quick start
+For a custom transport, implement the public `TransportBase` contract and supply it to `MultimodalDataset` the same way. See [Transport extensions](docs/TRANSPORT_EXTENSIONS.md).
 
-Runweaver discovers tar shards beneath modality directories. Every fragment
-must use matching shard names and sample keys when samples are assembled across
-modalities:
+## Dataset Management: storage is only the beginning
+
+```text
+TAR / Memory / your TransportBase implementation
+                     |
+                     v
+              LayoutSource
+           decoding · identity
+                     |
+                     v
+               DatasetView
+           providers · artifacts
+                     |
+                     v
+             threaded prefetch
+                     |
+                     v
+          MultiDatasetManager
+           per-domain or mixed
+                     |
+                     v
+          DynamicCollator / DataLoader
+```
+
+Each `MultimodalDataset` has **one transport**. `MultiDatasetManager` can combine multiple datasets, including datasets backed by different transports.
+
+**Transport** is responsible for finding and delivering samples. **Providers** are application-defined middleware that can enrich or filter samples. **Artifacts** hold dataset-scoped values. **Collation** turns delivered values into batches, with type-aware handling of tensors, arrays, scalars, strings, and other payloads.
+
+The public transport contract requires a stable `__key__` per sample. `__shard__` is optional and only required by explicitly partition-aware operations or providers. A transport need not use a filesystem.
+
+### TAR remains a first-class option
+
+The default `TarTransport` discovers modality fragments under a dataset root and synchronizes samples by shard and key.
 
 ```text
 datasets/example/
 ├── text/
-│   ├── 000.tar    # s1.text.txt, s2.text.txt, ...
+│   ├── 000.tar      # a.text.txt, b.text.txt, ...
 │   └── 001.tar
 └── embedding/
-    ├── 000.tar    # s1.embedding.npy, s2.embedding.npy, ...
+    ├── 000.tar      # a.embedding.npy, b.embedding.npy, ...
     └── 001.tar
 ```
 
-The member name format is `<sample-id>.<modality>.<extension>`. Supported
-decoders currently include text, NumPy (`.npy` and `.npz`), and WAV payloads.
+The corresponding fragments must align on shard names and sample keys when they are synchronized.
 
-A loader can be built from a plain dictionary:
+A configuration-driven loader is available:
 
 ```python
 from runweaver_ml.dataset_management import build_dataset_and_loader
@@ -103,27 +157,51 @@ config = {
 }
 
 loader = build_dataset_and_loader(config)
-
 for batch in loader:
-    print(batch["sample_id"], batch["text"], batch["embedding"].shape)
+    print(batch["sample_id"], batch["text"])
 ```
 
-`mix_mode` accepts `per_domain` or `mixed`. `exhaust_policy` accepts `finite`
-(an alias for `finite_exhaustive`), `finite_exhaustive`, `finite_stationary`, or
-`loop`. In mixed mode, dataset probabilities are proportional to
-`sqrt(dataset_size) * bias`.
+In mixed mode, dataset selection weights are proportional to `sqrt(num_samples) * bias`. Exhaustion policies include finite traversal and looping options.
 
-Dataset batches always contain `sample_id`, `__shard__`, and `domain`. NumPy
-arrays are stacked as float32 tensors, integer and floating-point scalars become
-tensors, strings remain lists, and WAV values remain lists so variable-length
-audio is not stacked automatically.
+**Large payloads need not be loaded all at once.** TAR deferred loading indexes eligible fragments and resolves their payloads on demand. Readers have explicit shared ownership, including cleanup on failure and cancellation. Metadata counting uses raw sample identities without decoding encoding payloads, avoiding a separate eager-loading spike.
 
-## Training integration
+A sample batch always includes `sample_id` and `domain`; `__shard__` is included only when supplied. Numeric values can become tensors, arrays are stacked where appropriate, and variable-length WAV values remain lists.
 
-The implemented training entry points are `PhaseOrchestrator.train_epoch()` and
-`PhaseOrchestrator.validate_epoch()`. Applications construct the model,
-optimizer, loaders, parameter wrapper, trainer, and optional logger before
-calling these loops:
+## Phase Control: structure without prescribing the experiment
+
+Phase Control describes *when and how training behavior changes*, while the host application decides *what is being trained*.
+
+```text
+PhaseManager -> PhaseContext
+                     |
+                     v
+           targets + schedules
+                     |
+                     v
+       ParameterWrapper / ScheduleEngine
+                     |
+                     v
+       TrainingModule + TrainerBase
+                     |
+                     v
+       PhaseOrchestrator.train_epoch()
+         optimization · validation
+         logging hooks · checkpoints
+```
+
+A phase carries a name, enabled state, run settings, targets, and schedules. The application assembles each phase's model, optimizer, loaders, and training module.
+
+`TrainerBase` provides a small computation contract:
+
+```python
+compute(batch, params)  # -> (loss, payload)
+train_context()         # context manager
+eval_context()          # context manager
+```
+
+`TrainingModule` connects that contract to loop hooks and scheduled parameters. `ObjectiveComposer` is available when an experiment benefits from combining multiple `TrainingObjective` implementations around a shared `TrainingContext`; it is optional.
+
+A configured loop can be invoked directly:
 
 ```python
 from runweaver_ml.phase_control import PhaseOrchestrator, TrainLoopConfig
@@ -155,51 +233,43 @@ final_step = PhaseOrchestrator.train_epoch(
 )
 ```
 
-Here `training_module` is a `TrainingModule` wrapping a trainer whose
-`compute(batch, params)` method returns `(loss, payload)` and whose model state
-is managed through `train_context()` and `eval_context()`. `TrainingModule`
-advances scheduled parameters at the beginning of every step and supplies
-logging, validation, and checkpoint hooks.
+The example assumes your application has constructed `training_module`, `optimizer`, and the loaders. RunWeaver does **not** construct a complete training run from YAML, choose model architectures, or impose checkpoint storage.
 
-Applications assemble each phase and call the static epoch methods directly.
-Steps and parameter schedules are local to each call. The current loop is
-PyTorch-oriented and uses CUDA AMP only when CUDA is available. Checkpointing
-is optional and supplied as a callback when constructing `TrainingModule`;
-RunWeaver does not prescribe model or training-session persistence.
+## Extension points
 
-Validation metric ownership is explicit. A module may use its metric and
-collector handlers, or set `validation_owner="trainer"` when its trainer
-implements `reset_metrics()`, `update_metrics(payload)`, and
-`report_metrics()`.
+RunWeaver is intended to be extended by composition, not by copying the framework.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for component responsibilities and data
-flow. Review [TODO.md](TODO.md) for known discrepancies, acceptance criteria,
-and completion tracking.
+- **Storage:** supply a `TransportBase` implementation and a modality manifest. Native values are supported.
+- **Sample processing:** install application-defined providers and artifacts.
+- **Training behavior:** implement a trainer, objectives, model wrapper, and hooks as needed.
+- **Configuration:** construct objects in Python or translate your own YAML/configuration into the supported dictionaries. RunWeaver itself does not load YAML.
+
+Provider requirements are validated against available capabilities. Providers that need partition identity can explicitly declare `__shard__` in `requires`; ordinary providers and transports do not need it.
+
+## Documentation
+
+- [Architecture](ARCHITECTURE.md): subsystem boundaries, data flow, ownership, extension contracts, and limitations.
+- [Transport extensions](docs/TRANSPORT_EXTENSIONS.md): the concrete public transport contract, lazy payload lifecycle, and examples.
+- [TODO](TODO.md): tracked work and known discrepancies.
 
 ## Development
-
-Run the test suite from the repository root after installing the project and
-its dependencies:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-The present tests focus on the tar transport/layout boundary: modality
-discovery, synchronized fragment merging, decoding, lazy payloads, shuffling,
-and failure cases.
+The suite covers TAR behavior, transport extension cases, sample processing, resource cleanup, and metadata counting. Additional phase-control integration coverage remains a development priority.
 
-## Project status
+## Scope and status
 
-This is an early research framework (`0.1.x`), not a stable public API. Areas
-that remain intentionally application-owned or incomplete include:
+RunWeaver ML is **research infrastructure**, not an all-in-one training platform. Application-level run assembly, model and optimizer creation, concrete provider implementations, logger integration, and checkpoint destinations remain application responsibilities.
 
-- constructing a full run from configuration;
-- application-level phase assembly;
-- model, optimizer, logger, and checkpoint construction;
-- built-in artifact/provider implementations (the framework supplies their
-  extension contracts and registries); and
-- broader phase-control and integration test coverage.
+The library is currently at **0.1.x**, and its APIs may change as the framework matures. Contributions should preserve the one-way dependency: applications import RunWeaver, never the reverse.
 
-Contributions should preserve the dependency boundary: applications may import
-Runweaver ML, but Runweaver ML must not import application-specific code.
+## Using RunWeaver ML? I'd love to hear about it!
+Whether you've integrated RunWeaver into a research project, built your own transport, or simply found something useful, I'd love to know.
+Open a GitHub Discussion or Issue and tell me what you're working on. Feedback, suggestions, and examples of real-world usage are always welcome.
+And if RunWeaver saved you some time, a GitHub star is a lovely way to show your appreciation. ⭐
+
+
+Licensed under **GPL-3.0-or-later**. See [LICENSE](LICENSE).

@@ -1,317 +1,389 @@
-# Runweaver ML Architecture
+# RunWeaver ML: Architecture
 
-## Scope and boundary
+RunWeaver ML extracts reusable **training control** and **dataset processing** from experimental ML applications. Its architecture deliberately avoids becoming an application framework: the host constructs models, data sources, configuration, and runtime dependencies.
 
-Runweaver ML is a standalone `src`-layout Python package containing reusable
-training-control and dataset-streaming infrastructure. It may depend on the
-Python standard library, its declared third-party dependencies, and other
-modules within `runweaver_ml`.
-
-The dependency direction is one-way:
+The two major subsystems are **peers**, not layers of one mandatory stack.
 
 ```text
-research application
-        │
-        │ constructs models, configuration, loggers, and extensions
-        ▼
-   runweaver_ml
+                    Research application
+                  /                      \
+                 v                        v
+        +----------------+       +---------------------+
+        | Phase Control  |       | Dataset Management  |
+        | phases         |       | transports          |
+        | schedules      |       | sample processing   |
+        | objectives     |       | prefetch + batching |
+        | training loops |       | dataset mixing      |
+        +----------------+       +---------------------+
+                 ^                        |
+                 |       optional         |
+                 +------- batches --------+
 ```
 
-Framework modules must not import models, paths, registries, or experiment
-configuration from a host application. Application-specific behavior is
-provided through objects passed into the framework or through the artifact and
-provider extension registries.
+**Phase Control does not depend on DSM. DSM does not depend on Phase Control.** Applications can use either independently.
 
-## Package structure
+## Architectural principles
+
+1. **Application-to-library dependency only.** Framework code must not import application models, paths, registries, or experiment configuration.
+2. **Explicit composition.** Applications construct and connect components; there is no global runtime container.
+3. **Separation of concerns.** Storage delivery, sample transformation, batch assembly, training objectives, and training execution have different owners.
+4. **Extensibility at boundaries.** New transports and application-defined providers should not require modifying the processing pipeline.
+5. **Preserve practical performance.** Deferred reading and bounded prefetch are part of making large datasets usable, not incidental conveniences.
+6. **Make requirements local.** Optional metadata such as `__shard__` should be required only by operations that need it.
+
+## Package map
 
 ```text
-runweaver_ml
-├── phase_control
-│   ├── execution       trainer/module/model-wrapper contracts
-│   ├── objectives      shared batch context and objective composition
-│   ├── scheduling      target schedules and schedule construction
-│   ├── phase_orchestrator.py
+src/runweaver_ml/
+├── phase_control/
+│   ├── execution/          trainer, module, model wrapper contracts
+│   ├── objectives/         forward strategy, objective composition, context
+│   ├── scheduling/         schedule engine and schedule definitions
 │   ├── train_phase_manager.py
+│   ├── phase_orchestrator.py
+│   ├── param_provider.py
+│   ├── param_wrapper.py
 │   └── train_loop_config.py
-├── dataset_management
-│   ├── artifacts       dataset-scoped values and artifact registry
-│   ├── engine
-│   │   ├── layout      iteration policy, decoding, and layout source
-│   │   ├── metadata    sample-count metadata
-│   │   └── transport   tar discovery and payload transport
-│   ├── source          root/middleware contracts and provider registry
-│   ├── views           composed sample pipeline
+├── dataset_management/
+│   ├── artifacts/          artifact values, store, registry
+│   ├── source/             middleware/provider contracts and registry
+│   ├── views/              DatasetView processing pipeline
+│   ├── engine/
+│   │   ├── transport/      public transport boundary; TAR and memory
+│   │   ├── layout/         LayoutSource, decoding and iteration policy
+│   │   ├── metadata/       sample counts and TAR metadata cache
+│   │   ├── multimodal_dataset.py
+│   │   ├── multi_dataset_manager.py
+│   │   ├── dataset_prefetch_engine.py
+│   │   └── dynamic_collator.py
 │   └── build_dataloader.py
-└── utils               timing utilities
+└── utils/
 ```
 
-The root package exposes the package version only. Stable-looking convenience
-imports live in `runweaver_ml.phase_control`, `runweaver_ml.dataset_management`,
-and `runweaver_ml.utils`; TransportBase, TransportManifest, DeferredPayload, and MemoryTransport are
-public extension types exposed by runweaver_ml.dataset_management. Lower-level
-layout types remain implementation details.
+The root package exposes its version. Public convenience imports are available from `runweaver_ml.phase_control` and `runweaver_ml.dataset_management`. Not every class in `engine/` is a supported extension API.
 
-## Runtime overview
+---
 
-The training and dataset systems meet at application construction time rather
-than through a hidden global runtime:
+# Part I: Phase Control
+
+## Responsibility boundary
+
+Phase Control coordinates training behavior over time. It does **not** choose datasets, instantiate model architectures, build optimizers, or create an application-wide experiment runner.
+
+The host owns phase-by-phase construction. It can use RunWeaver's static loop methods with any compatible loaders, including loaders unrelated to DSM.
+
+## Phase descriptions and execution context
+
+`PhaseManager` validates phase entries and produces iterable `PhaseContext` objects. A phase has the following logical fields:
+
+```yaml
+name: alignment
+enabled: true
+run:
+  steps: 1000
+  trainable: [projector]
+targets:
+  alignment_weight: 1.0
+schedules: {}
+```
+
+This illustrates the **phase structure**, not a YAML file loader. RunWeaver accepts Python dictionaries; an application can parse YAML itself.
+
+`PhaseContext` contains phase identity, run settings, target values, schedule definitions, and pass-through global/runtime context. It does not execute the phase.
+
+Sequential phases do not automatically share optimizers, learning-rate schedulers, or execution state. The application decides what to rebuild and what to preserve.
+
+## Runtime parameters and scheduling
 
 ```text
-tar fragments
-    │
-    ▼
-TarTransport → LayoutSource → DatasetView → prefetch → dataset manager
-                                                         │
-                                                         ▼
-                                                    DataLoader
-                                                         │ batches
-                                                         ▼
-application objects → TrainingModule → PhaseOrchestrator.train_epoch
-                           │                    │
-                           │ parameters         ├─ optimizer / scheduler
-                           │                    ├─ logging / checkpoint hook
-                           ▼                    └─ validation loop
-                 ParameterWrapper
-                 ├─ ParamProvider
-                 └─ ScheduleEngine → TargetRegistry
+PhaseContext
+  ├── run settings -----------------------┐
+  ├── target values -> TargetRegistry ----┤
+  └── schedules -> ScheduleEngine --------┤
+                                         v
+                                    ParamProvider
+                                         |
+                                         v
+                                  ParameterWrapper
+                                         |
+                                         v
+                                training computation
 ```
 
-There is deliberately no package-owned dependency injection container. The
-host application wires these pieces together explicitly.
+- `TargetRegistry` stores mutable, schedule-eligible targets.
+- `ScheduleEngine` updates registered targets for a given step.
+- `ParamProvider` resolves target values before run/global/runtime configuration.
+- `ParameterWrapper` presents `get()`, `has()`, `step()`, and diagnostics to training code.
 
-## Phase control
+A schedule can only update an existing registered target. Scheduling is phase-local; it is not a hidden global training state.
 
-### Phase description
+## Trainer and objective composition
 
-`PhaseManager` validates a lightweight phase structure and produces iterable
-`PhaseContext` objects. Each phase contains:
+`TrainerBase` defines the core training contract:
+
+```python
+compute(batch, params)  # -> (loss, payload)
+train_context()         # -> context manager
+eval_context()          # -> context manager
+```
+
+`TrainingModule` adapts the trainer to lifecycle hooks: scheduled parameter advancement, logging payloads, validation reporting, collection, and checkpoint callbacks.
+
+For experiments with multiple losses, `ObjectiveComposer` is an **optional** `TrainerBase` implementation. A `ForwardStrategy` populates a per-batch `TrainingContext`; individual `TrainingObjective` objects compute losses from that context. The composer combines their losses and reports.
+
+Model wrapper contracts provide mode changes and trainable-component selection without imposing a specific neural-network architecture.
+
+## Execution loop ownership
+
+`PhaseOrchestrator.train_epoch()` is the existing inner training loop. At a high level it:
+
+1. Enters the training context and advances scheduled parameters.
+2. Computes `(loss, payload)` under optional CUDA autocast.
+3. Performs backpropagation and optimizer stepping, optionally using a gradient scaler.
+4. Advances an optional learning-rate scheduler.
+5. Invokes payload/logging hooks.
+6. Runs configured validation and checkpoint hooks.
+7. Stops at the configured step limit.
+
+`validate_epoch()` runs computation without gradients in the evaluation context and returns a validation summary.
+
+Validation metrics may be owned by the trainer or by `TrainingModule` handlers, selected during module construction. Checkpoint persistence is injected via callbacks rather than embedded in a model wrapper.
+
+**The host remains responsible** for creating the `TrainingModule`, optimizer, loaders, logger, and phase-specific runtime. `TrainLoopConfig` configures the loop; it is not a complete run configuration.
+
+---
+
+# Part II: Dataset Management (DSM)
+
+## End-to-end data flow
 
 ```text
-name:       unique phase name
-enabled:    whether the host should execute it
-run:        static run fields, including steps and trainable components
-targets:    scalar or boolean values eligible for scheduling
-schedules:  schedule definitions keyed by target
+       +---------------------------------------+
+       | Storage transport                     |
+       | TarTransport / MemoryTransport / own   |
+       +--------------------+------------------+
+                            |
+                    raw sample dictionaries
+                            |
+                            v
+                       LayoutSource
+                 identity + decoding policy
+                            |
+                            v
+                        DatasetView
+                 ordered middleware providers
+                   + dataset artifact access
+                            |
+                            v
+                    DatasetPrefetchEngine
+                            |
+                            v
+                 MultimodalDataset iterator
+                            |
+                +-----------+-----------+
+                |                       |
+                v                       v
+        standalone loader       MultiDatasetManager
+                                      |
+                                DynamicCollator
+                                      |
+                                   DataLoader
 ```
 
-`PhaseManager` stores phase contexts; it does not execute them. The host still
-decides how enabled phases map to models, optimizers, datasets, and parameter
-schedules.
+The diagram describes responsibilities, not separate processes. Prefetch uses threads; the standard PyTorch DataLoader uses `num_workers=0`.
 
-### Runtime parameters and schedules
+## 1. Transport: where samples come from
 
-Runtime parameter lookup is layered:
+**Transport is a storage boundary, not a processing pipeline.**
 
-1. `TargetRegistry` owns mutable target values.
-2. `ScheduleEngine` updates registered targets for a training step.
-3. `ParamProvider` resolves target values first, followed by `run`, global, and
-   runtime configuration.
-4. `ParameterWrapper` presents `get()`, `has()`, `step()`, and diagnostic helper
-   methods to training code.
+`MultimodalDataset` accepts either a local root (constructing `TarTransport` by default) or a supplied transport instance.
 
-Only names already present in `TargetRegistry` can be scheduled. Registering a
-schedule initializes its target at the engine's current step, which also makes
-checkpoint resume state explicit.
+The public extension types are:
 
-### Trainer and objective composition
+```python
+from runweaver_ml.dataset_management import (
+    TransportBase,
+    TransportManifest,
+    DeferredPayload,
+    MemoryTransport,
+)
+```
 
-`TrainerBase` defines the central execution contract:
+A transport exposes its `manifest` before construction and implements:
+
+```python
+iter_samples(
+    *,
+    deliverables,
+    load_policy,
+    shardshuffle=False,
+    anchor_modality=None,
+)
+```
+
+Each call must support fresh iteration. The transport owns sample discovery, synchronization, storage access, and resource lifetime. Unsupported partition or anchor operations should fail explicitly.
+
+The manifest's `available_modalities` maps normalized names to serializer identifiers. `None` means a native Python value; other identifiers select the existing decoding codecs.
+
+Each emitted sample requires `__key__`, a stable identity. `__shard__` is **optional partition identity**, not necessarily a TAR filename. It is required only by explicitly shard-aware shuffle or provider operations. Transports do not have to invent partitions.
+
+**One MMDS instance uses one transport.** DSM can combine multiple MMDS instances with different transports.
+
+`MemoryTransport` is a reference implementation using native Python values. A contributor can implement another transport without registering it in a central backend registry.
+
+See [Transport extensions](docs/TRANSPORT_EXTENSIONS.md) for the full public contract and compatibility details.
+
+## 2. TAR transport: one concrete backend
+
+`TarTransport` discovers fragments one directory below a dataset root:
 
 ```text
-compute(batch, params) -> (loss, payload)
-train_context()        -> context manager
-eval_context()         -> context manager
+dataset root/
+├── text/
+│   ├── 000.tar
+│   └── 001.tar
+└── features/
+    ├── 000.tar
+    └── 001.tar
 ```
 
-`TrainingModule` adapts that trainer to the loop lifecycle. It advances
-parameters on step start, delegates computation, and provides overridable hooks
-for reporting, validation metrics, collection, and checkpoints.
+A fragment may contain one or several modalities. Requested fragments are synchronized by shard name and sample key. The transport detects missing aligned samples rather than silently inventing them.
 
-`ObjectiveComposer` is an optional `TrainerBase` implementation. A forward
-strategy populates a per-batch `TrainingContext`, then one or more
-`TrainingObjective` objects compute losses against the shared context. Their
-losses are summed and their reports and validation metrics are aggregated.
+TAR discovery, filesystem validation, fragment overlays, and payload access belong to `TarTransport`. There is **no longer a `DatasetLayout` wrapper**.
 
-The model wrapper contract controls train/eval modes and trainable component
-selection without requiring the framework to understand a specific model
-architecture.
+### Deferred payloads and resource ownership
 
-### Loop ownership
+Eligible heavy TAR fragments can be indexed without eagerly materializing their payload bytes. `DeferredPayload` resolves requested data later, before provider filtering.
 
-`PhaseOrchestrator.train_epoch()` currently owns the inner loop:
+For lazy TAR fragments:
 
-1. enter the training context;
-2. advance scheduled parameters;
-3. compute loss under optional CUDA autocast;
-4. backpropagate and step the optimizer (optionally with a gradient scaler);
-5. step an optional learning-rate scheduler;
-6. invoke payload and logging hooks;
-7. periodically run validation and checkpoint hooks; and
-8. stop at `max_steps`.
+- Indexed members refer to a shared TAR reader.
+- Outstanding payloads share **reference-counted ownership** of that reader.
+- Access to the reader is synchronized to protect seek and decompression state.
+- Loading, failed loading, explicit abandonment, and collection release payload ownership.
+- The reader closes after the final outstanding owner releases it.
+- Delivered payloads may remain valid after their source iterator closes.
+- Undelivered payloads are released when iteration is cancelled.
+- A failed deferred load is terminal; retry requires a fresh payload from another iteration.
 
-`validate_epoch()` runs computation without gradients in the trainer's
-evaluation context and returns the module's validation summary.
+`DeferredPayload.close()` abandons an unresolved payload. Cached successfully loaded values remain available.
 
-Run-level construction remains application-owned and callers invoke the static
-loop methods with an already prepared trainer, optimizer, and loaders. Loop
-steps and target schedules are phase-local. This keeps dataset selection,
-optimizer policy, and concrete model construction outside RunWeaver.
+The eager WebDataset path also has explicit stream cleanup, including exception paths. Prefetch shutdown closes its active root iterator.
 
-Sequential phases do not imply continuity of optimizers, schedulers, 
-parameters, or execution state. The application reconstructs phase-specific 
-execution infrastructure.
+This lifetime design avoids per-payload archive reopening. That matters particularly for `.tar.gz`, where backward access can incur substantial decompression costs. The current synchronization path may deliver indexed samples in reverse order; compressed archive access order remains a performance consideration.
 
-Validation ownership is selected when constructing `TrainingModule`: either
-the trainer implements the complete metric lifecycle or the module uses its
-metric and collector handlers. Checkpoint persistence is likewise an injected
-callback rather than a model-wrapper requirement.
+### Metadata counting
 
-## Dataset management
+Default root-based TAR construction uses a local JSON metadata cache. When missing, metadata generation counts **raw sample identities using deferred loading**, then releases unused loaders without decoding payloads.
 
-### Storage model
+This avoids eagerly loading whole encoding shards merely to determine sample counts. The cache format and the historical first-discovered-modality counting universe are unchanged.
 
-`TarTransport` discovers fragments one directory below a dataset root. A
-fragment may contain one modality or several. Fragment directories participating
-in a dataset must use aligned shard names, and requested fragments must contain
-matching sample keys for every synchronized shard.
+For supplied transports, MMDS accepts an explicit `num_samples`, can use the transport's `num_samples` for the default universe, or counts by raw iteration. Counting can be expensive for transports without cheap reiteration; unbounded streams are not currently an established use case.
+
+Counting samples does not validate serialized payload contents.
+
+## 3. LayoutSource and DatasetView: processing, not storage
+
+`LayoutSource` consumes a transport manifest, applies decoding policy, and maps `__key__` to the public `sample_id` while adding the dataset `domain`. Optional `__shard__` is preserved only when supplied.
+
+`DatasetView` passes samples through ordered middleware providers. Providers are application-defined and can enrich, filter, or otherwise process samples.
+
+Provider installation checks required input capabilities and artifacts. A provider that needs partition identity declares it explicitly, for example:
+
+```python
+requires = ["text", "__shard__"]
+```
+
+The `__shard__` requirement is checked per sample before the provider processes it. Ordinary providers and transports are not forced to provide shard metadata.
+
+Artifacts are dataset-scoped values managed by an `ArtifactStore`. Providers are sample-aware middleware. The framework supplies registries and contracts, not built-in application-specific persistent providers.
+
+Storage-aware application providers may access a concrete transport's own storage information, but **a local root path is not part of the generic transport contract**.
+
+## 4. Prefetch, dataset mixing, and collation
+
+`DatasetPrefetchEngine` uses threaded prefetch. It can decode samples ahead of consumption, improving overlap at the cost of queue memory. Prefetch workers may reorder sample delivery; strict global ordering should not be assumed.
+
+`MultiDatasetManager` is a PyTorch `IterableDataset` supporting:
+
+- `PER_DOMAIN`: exhaust active datasets in order.
+- `MIXED`: select datasets using normalized `sqrt(num_samples) * bias` weights.
+
+Exhaustion policies control whether traversal loops, consumes the available datasets, or stops based on the first exhausted mixed dataset. Active-domain filtering is supported.
+
+`DynamicCollator` always includes `sample_id` and `domain`. It includes `__shard__` only when supplied, retaining aligned `None` values for missing entries in mixed batches. It handles dictionaries recursively, stacks compatible NumPy arrays, tensorizes numeric scalars, and leaves strings, WAV payloads, and unsupported objects in lists.
+
+The standard `create_loader()` uses PyTorch DataLoader with `num_workers=0`, since DSM already provides threaded prefetch.
+
+---
+
+# Part III: Integration and ownership
+
+## Who builds what?
+
+| Concern | Owner |
+| --- | --- |
+| Model architectures and weights | Application |
+| Optimizers and learning-rate scheduler instances | Application |
+| Experiment/YAML configuration | Application |
+| Phase definitions and parameter scheduling machinery | Phase Control |
+| Training and validation loop implementation | Phase Control |
+| Concrete objectives and forward strategy | Application extension |
+| Storage access and sample universe | Transport |
+| Sample decoding and pipeline composition | DSM |
+| Concrete providers and artifacts | Application extension |
+| Prefetch, mixing, and collation | DSM |
+| Logger and checkpoint destinations | Application |
+| Run-level orchestration across phases | Application |
+
+Applications may connect the systems:
 
 ```text
-dataset root
-├── text/000.tar       s1.text.txt
-├── text/001.tar       s2.text.txt
-├── features/000.tar   s1.embedding.npy
-└── features/001.tar   s2.embedding.npy
+application config
+    ├── constructs datasets / loaders through DSM
+    ├── constructs model, optimizer, trainer
+    ├── constructs phase contexts and schedules
+    └── invokes PhaseOrchestrator with prepared objects
 ```
 
-Transport produces normalized sample dictionaries and owns its modality manifest.
-LayoutSource consumes that manifest directly: serializer identifiers select file
-decoders, while None declares native values that pass through unchanged. It adds
-the dataset domain. DatasetLayout has been removed; local root validation belongs
-to TarTransport. The view then passes samples through ordered middleware providers.
-
-TAR lazy loading uses `DeferredPayload` for requested single-modality fragments.
-It is disabled for a fragment when multiple requested modalities in that same
-fragment would require mixed eager/lazy behavior. Deferred TAR payloads share
-reference-counted indexed readers, with serialized access to their seek state.
-Readers close when the last outstanding loader releases ownership, including
-failed loads and abandoned payloads. Iterator shutdown abandons only undelivered
-payloads, so delivered payloads can outlive their iterator. Failed loads release
-their loader state; retry requires a fresh payload. Eager WebDataset streams are
-explicitly owned by TarTransport and closed on exit.
-
-### Dataset pipeline
-
-`MultimodalDataset` composes:
-
-- a supplied transport, or `TarTransport` constructed from a local root;
-- an `ArtifactStore` for dataset-scoped values;
-- local cached metadata for default TAR construction, or an explicit/transport
-  sample count with raw-iteration fallback for supplied transports;
-- a `DatasetView` containing the root layout source and providers; and
-- a threaded `DatasetPrefetchEngine`.
-
-Default TAR metadata generation counts raw samples from the first discovered
-modality, preserving the established count universe. It requests deferred
-payloads and explicitly abandons them without decoding or running providers.
-Metadata caching and its JSON format are unchanged.
-
-Artifacts are dataset-level values or state. Providers are sample-aware
-middleware that consume existing capabilities and add runtime values. Provider
-installation validates both required artifacts and required input capabilities.
-
-Artifact and provider base classes populate registries through subclass
-registration. The framework contains the construction mechanism but does not
-ship concrete application-specific extensions.
-
-See [transport extension contract](docs/TRANSPORT_EXTENSIONS.md) for the public
-interface, construction examples, and compatibility changes.
-
-### Multiple datasets and batching
-
-`MultiDatasetManager` is an `IterableDataset` with two traversal modes:
-
-- `PER_DOMAIN`: exhaust each active dataset in order;
-- `MIXED`: randomly sample active datasets using normalized
-  `(num_samples ** 0.5) * bias` weights.
-
-Exhaustion can loop, consume all datasets, or stop when the first mixed dataset
-is exhausted. A domain filter can restrict active datasets.
-
-`DynamicCollator` emits `sample_id` and `domain`, preserves optional `__shard__`
-values in aligned lists when supplied, and assembles requested modalities by type.
-Ordinary sample delivery does not require shard identity; partition-based shuffle
-and providers declaring `requires = ["__shard__", ...]` require it explicitly. It recursively collates
-structured dictionaries, stacks NumPy arrays, tensorizes numeric scalars, and
-leaves strings, WAV payloads, and unsupported values as lists. Missing strings,
-integers, and floats receive explicit placeholder values; other partially
-missing modalities remain lists.
-
-The standard loader deliberately uses `num_workers=0`, because dataset-level
-threaded prefetching is already provided by `DatasetPrefetchEngine`.
-
-## Host application responsibilities
-
-The application currently owns:
-
-- loading and validating complete experiment configuration;
-- constructing models and model wrappers;
-- selecting trainable components;
-- constructing optimizers and learning-rate schedulers;
-- defining concrete objectives, artifacts, and providers;
-- creating loggers and choosing checkpoint destinations;
-- constructing phase-specific datasets and loaders; and
-- iterating enabled phases and calling the training loop.
-
-These concerns should move into Runweaver ML only when they can be expressed
-without knowledge of a particular research project.
+But that integration is **a choice made by the application**, not a framework-imposed coupling.
 
 ## Configuration boundary
 
-Runweaver accepts Python dictionaries but does not itself load YAML or another
-configuration file format. Deployment-specific configuration must not be
-packaged with the library, especially absolute dataset, manifest, model, or
-checkpoint paths.
+RunWeaver consumes Python objects and dictionaries. It does not load YAML itself and should not package machine-specific paths to datasets, models, manifests, or checkpoints.
 
-Portable examples may be added as documentation or fixtures. They must use the
-actual implemented schema and should be exercised by tests when practical.
+Builders support root-based TAR datasets and explicitly supplied transport objects. Transport instances in Python dictionaries are **not** YAML backend selectors.
 
-## Known architectural limitations
+## Public API and compatibility
 
-- The public API is not yet versioned independently from the package release.
-- Run-level orchestration is intentionally application-owned.
-- Phase-control behavior has limited automated test coverage.
-- Some contracts are abstract base classes while others remain behavioral
-  conventions; protocol typing has not been standardized.
-- CUDA-specific autocast and gradient-scaler calls live in the generic training
-  loop, although AMP disables itself when CUDA is unavailable.
-- Artifact/provider registry population depends on concrete subclasses being
-  imported before configuration is built.
-- Default TAR metadata caching and TAR discovery assume local filesystem access;
-  supplied transports do not require local paths or metadata files.
+The library is at `0.1.x`; public APIs are evolving. Intentional convenience imports exist at the subsystem package level.
 
-## Design rules
+Notable DSM evolution:
 
-1. Preserve the one-way application-to-framework dependency.
-2. Keep phase control and dataset management separately composable.
-3. Prefer explicit construction and capability contracts over hidden globals.
-4. Keep configuration portable and free of application paths.
-5. Expose intentional convenience imports without treating every internal type
-   as stable public API.
-6. Fail clearly when synchronized data or required capabilities are missing.
-7. Add tests before changing transport identity, schedule, or lifecycle
-   semantics.
-8. Keep application construction outside the phase loop.
+- `DatasetLayout` was removed; `LayoutSource` remains.
+- `MultimodalDataset` accepts injected transports.
+- `__shard__` is optional except where explicitly required.
+- TAR retains shard-aware persistence and shuffling behavior.
+- TAR deferred loading has explicit shared reader ownership.
+- Missing TAR metadata no longer forces eager payload extraction.
 
-## Verification strategy
+Application code depending on internal layout objects or `view.root.layout.root` needs to use the concrete transport interface appropriate to that application. Generic transports do not promise a filesystem root.
 
-Current tests exercise the tar transport/layout boundary, including modality
-discovery, normalized decoding, multi-fragment synchronization, requested
-deliverables, deferred loading, shuffle behavior, and malformed layouts.
+## Verification and limitations
 
-The next highest-value coverage is:
+Tests cover transport extension, TAR discovery and synchronization, lazy payloads, counting, cancellation and resource cleanup, provider interactions, and DataLoader integration. Phase Control has less automated integration coverage than DSM.
 
-1. parameter precedence and schedule stepping;
-2. `TrainingModule` lifecycle order;
-3. CPU and CUDA-disabled loop behavior;
-4. multi-dataset exhaustion policies and weighting; and
-5. an end-to-end example with a minimal model, dataset, optimizer, and phase.
+Current boundaries and limitations include:
+
+- No built-in application-wide run assembler.
+- No bundled application-specific providers or artifacts.
+- No built-in SQL transport or general unbounded-stream semantics.
+- Prefetch can reorder delivery and hold decoded payloads in memory.
+- Compressed TAR backward seeks can be costly.
+- Some contracts are behavioral rather than standardized Python protocols.
+- Artifact/provider registration depends on concrete subclasses being imported.
+- The generic training loop uses CUDA-specific AMP paths when enabled, with CUDA availability checks.
+
+The guiding rule for future work is straightforward:
+
+**Extend storage without rewriting sample processing. Extend training behavior without embedding an experiment inside the framework.**
