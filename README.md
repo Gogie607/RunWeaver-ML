@@ -4,60 +4,63 @@
 
 RunWeaver ML is a lightweight, model-agnostic Python framework for experimental machine learning. It separates two recurring engineering problems from the experiments themselves:
 
-- **Phase Control:** coordinate multi-phase training, scheduled parameters, objectives, validation, and the training loop.
-- **Dataset Management (DSM):** load samples, prepare the data your model needs, combine datasets, and deliver training batches.
+## Dataset Management (DSM)
 
-**Use either subsystem independently, or use them together.** RunWeaver does not require a particular model, experiment layout, or storage format.
+Change your data source without rebuilding your processing pipeline. RunWeaver’s Dataset Management System separates transport from processing through independent, interchangeable layers, drawing on the separation of concerns used in protocol stacks.
 
-> **Bring your own storage backend. Keep the RunWeaver processing pipeline.**
+Switch between TAR archives, memory, or your own transport implementation without changing the processing pipeline. Load samples, prepare the data your model needs, combine datasets, and deliver training batches.
 
-### What does that mean in practice?
+## Phase Control
 
-Suppose your application trains a model on audio recordings. You need to load recordings, turn them into model inputs, group them into batches, and train in several stages with different objectives. RunWeaver can handle the repeatable parts of that workflow. **You still write the model and decide how it learns.**
+RunWeaver's Phase Control system organizes training into distinct phases, each with its own objectives, trainable components, and execution settings. Your application controls the transitions between phases; RunWeaver coordinates training and validation within each prepared phase and provides a consistent execution framework for experiments that require different training strategies at different stages.
 
-A few terms used throughout this project:
+The application retains control over its models, optimizers, and experiment-specific behavior.
 
-| Term | Plain-English meaning |
-| --- | --- |
-| **Transport** | How samples arrive from storage, memory, or another source. |
-| **Provider** | Application-supplied processing that adds information to a sample or decides whether to keep it. For example, preparing audio features. |
-| **Artifact** | A dataset-level value or resource made available to processing components. It is **not** automatically a saved model or a cached output. |
-| **Collator** | Combines individual samples into a batch your training code can use. |
-| **Phase** | One stage of training, with its own settings and objectives. |
+### Scheduling Engine
 
-You don't have to use every component. Dataset Management and Phase Control can be adopted separately.
+RunWeaver's Scheduling Engine makes experimental intent explicit: parameters can evolve throughout training without burying that behavior in custom loop code. Linear ramps, smooth cosine transitions, gates, and periodic switches provide a compact vocabulary for designing experiments.
 
-RunWeaver began as infrastructure extracted from a research application. It remains an evolving `0.1.x` library, not a turnkey experiment runner or a frozen public API.
+Gradually increase an alignment objective’s weight, activate an auxiliary loss during a chosen window, or alternate experimental settings—all through scheduled parameters. Each scheduled value follows directly from its configuration and the supplied training step, making changing training strategies predictable, easy to inspect, explain, and reproduce.
+
+> **The Scheduling Engine isn't just a convenience for changing learning rates or loss weights. It makes complex training strategies practical.**
+
+**Use either subsystem independently, or combine them.** RunWeaver supplies the infrastructure; your application decides what to train and how.
 
 ## Why RunWeaver?
 
-Research code changes faster than infrastructure should. A new model might need a different objective, a training phase might freeze different components, or a dataset might move from TAR archives to a database. None of those decisions should require rewriting the entire training or input pipeline.
+Research experiments change constantly. Datasets grow, storage formats change, training objectives evolve, and different stages of training demand different behavior. Rewriting data pipelines and training loops for each new idea slows down the research itself.
 
-RunWeaver supplies the reusable machinery while **your application owns the experiment**.
+RunWeaver keeps those concerns separate. **Change the transport without rewriting sample processing. Change the training strategy without rewriting the loop.**
 
-| Your challenge | RunWeaver provides | You decide |
-| --- | --- | --- |
-| Training in distinct stages | Phase descriptions, scheduled targets, execution loops | Models, trainable components, phase assembly |
-| Combining loss functions | Objective composition and shared batch context | Forward passes and loss definitions |
-| Serving multimodal samples | Transport boundary, decoding, providers, prefetch, batching | Data source, modality meanings, transformations |
-| Mixing datasets | Per-domain or weighted mixed iteration | Dataset selection, bias, exhaustion policy |
-| Integrating into an existing project | Explicit Python construction and extension points | Configuration format, logging, checkpoints |
-
-### Two systems, no forced marriage
+### How the pieces fit
 
 ```text
                          Your research application
                         /                         \
                        v                           v
               PHASE CONTROL                  DATASET MANAGEMENT
-           phases · schedules             storage transport · decoding
+           phases · schedules             transport · decoding
            trainers · objectives          providers · artifacts · prefetch
            train/validate loops           mixing · collator · DataLoader
                        \                           /
                         \____ optional integration _/
 ```
 
-Phase Control works with loaders supplied by your application, whether or not they came from DSM. DSM produces batches usable by your own training code, whether or not you use Phase Control.
+Phase Control accepts loaders from your application, whether or not they use DSM. DSM supplies batches to your training code, whether or not you use Phase Control. Neither subsystem dictates your model, experiment configuration, or storage format.
+
+### A few useful terms
+
+| Term | Meaning |
+| --- | --- |
+| **Transport** | The protocol layer that delivers samples from storage, memory, or another source, independently of the processing pipeline. |
+| **Provider** | A component that processes samples, optionally adding, modifying, or filtering their data. |
+| **Artifact** | A value or callable object that generates values, made available to dataset processing components. |
+| **Collator** | Combines individual samples into a batch your training code can use. |
+| **Phase** | One stage of training, with its own settings and objectives. |
+
+RunWeaver's transport architecture follows the separation of concerns used in network protocol stacks. Processing components need not know whether their samples came from TAR archives, memory, or a custom transport. The included TAR and memory transports demonstrate the interface; other sources can be integrated by implementing the transport contract.
+
+RunWeaver began as infrastructure extracted from a research application. It remains an evolving `0.1.x` library, not a turnkey experiment runner or a frozen public API.
 
 ## Install
 
@@ -179,7 +182,7 @@ for batch in loader:
 
 In mixed mode, dataset selection weights are proportional to `sqrt(num_samples) * bias`. Exhaustion policies include finite traversal and looping options.
 
-**Large payloads need not be loaded all at once.** TAR deferred loading indexes eligible fragments and resolves their payloads on demand. Readers have explicit shared ownership, including cleanup on failure and cancellation. Metadata counting uses raw sample identities without decoding encoding payloads, avoiding a separate eager-loading spike.
+**Large payloads need not be loaded all at once.** Eligible TAR payloads load on demand, and sample counting avoids decoding those payloads just to determine dataset size. This reduces unnecessary loading and memory use. See [Transport extensions](docs/TRANSPORT_EXTENSIONS.md) for resource ownership and cleanup details.
 
 A sample batch always includes `sample_id` and `domain`; optional storage identifiers are included only when supplied. Numeric values can become tensors, arrays are stacked where appropriate, and variable-length WAV values remain lists.
 
@@ -188,9 +191,10 @@ A sample batch always includes `sample_id` and `domain`; optional storage identi
 Phase Control describes *when and how training behavior changes*, while the host application decides *what is being trained*.
 
 ```text
-PhaseManager -> PhaseContext
+Optional PhaseManager -> PhaseContext
                      |
                      v
+           application assembles
            targets + schedules
                      |
                      v
@@ -216,6 +220,53 @@ eval_context()          # context manager
 ```
 
 `TrainingModule` connects that contract to loop hooks and scheduled parameters. `ObjectiveComposer` is available when an experiment benefits from combining multiple `TrainingObjective` implementations around a shared `TrainingContext`; it is optional.
+
+### Try a scheduled experimental parameter
+
+Smoothly increase an alignment loss weight from zero to one over the first 1,000 steps with a cosine schedule:
+
+```python
+from runweaver_ml.phase_control import (
+    ParameterWrapper,
+    ParamProvider,
+    ScheduleEngine,
+    TargetRegistry,
+    build_schedule_block,
+)
+
+registry = TargetRegistry({"alignment_weight": 0.0})
+engine = ScheduleEngine(registry)
+engine.register("alignment_weight", build_schedule_block({
+    "type": "cosine",
+    "start": 0.0,
+    "end": 1.0,
+    "start_step": 0,
+    "end_step": 1_000,
+}))
+params = ParameterWrapper(
+    engine,
+    ParamProvider(run={}, global_cfg={}, runtime={}, registry=registry),
+)
+
+for step in (0, 250, 500, 1_000):
+    params.step(step)
+    print(step, f'{params.get("alignment_weight"):.3f}')
+# 0 0.000
+# 250 0.146
+# 500 0.500
+# 1000 1.000
+```
+
+![Cosine alignment weight schedule](docs/images/cosine_schedule.png)
+
+The curve is generated from RunWeaver itself. To reproduce it with Matplotlib
+available, run `python scripts/plot_readme_schedule.py` from the repository root.
+
+In training, pass this parameter wrapper to `TrainingModule`; it advances the
+schedule before each training computation. Your trainer reads
+`params.get("alignment_weight")` to weight its loss. Construct fresh scheduling
+objects for each phase. The same mechanism supports cosine transitions, threshold
+switches, gates, and periodic square waves.
 
 A configured loop can be invoked directly:
 
@@ -265,6 +316,7 @@ Provider requirements are checked against the data available in the pipeline. De
 ## Documentation
 
 - [Architecture](ARCHITECTURE.md): subsystem boundaries, data flow, ownership, extension contracts, and limitations.
+- [Architectural decisions](docs/ARCHITECTURAL_DECISIONS.md): design intentions, historical compromises, and review principles.
 - [Transport extensions](docs/TRANSPORT_EXTENSIONS.md): the concrete public transport contract, lazy payload lifecycle, and examples.
 - [TODO](TODO.md): tracked work and known discrepancies.
 
