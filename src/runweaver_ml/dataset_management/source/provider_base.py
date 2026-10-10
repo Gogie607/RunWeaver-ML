@@ -22,6 +22,8 @@ class ProviderBase( MiddlewareSourceBase):
     `requires` describes sample fields expected by the provider.
     `artifact_requires` describes named Artifacts expected in the view store.
     `capabilities` describes sample fields the provider can supply.
+    Shard-aware providers declare "__shard__" in requires; its presence is
+    checked per sample because ordinary transports need not supply it.
     """
 
 
@@ -66,6 +68,11 @@ class ProviderBase( MiddlewareSourceBase):
         ctx,
     ):
         for sample in stream:
+            if "__shard__" in self.requires and sample.get("__shard__") is None:
+                raise ValueError(
+                    f"{type(self).__name__} requires __shard__ for "
+                    f"sample {sample.get('sample_id')!r}"
+                )
             sample = self.process(sample, ctx)
 
             if sample is not None:

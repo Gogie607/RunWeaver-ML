@@ -29,7 +29,8 @@ class LayoutSource(IteratableRootBase):
 
     def __init__(
         self,
-        layout,
+        transport,
+        domain,
         load_policy,
         deliverables,
         artifact_store,
@@ -38,12 +39,13 @@ class LayoutSource(IteratableRootBase):
         super().__init__()
 
 
-        self.layout = layout
+        self.transport = transport
+        self.domain = domain
         self.load_policy = set(load_policy)
         self.artifact_store = artifact_store
         self.op_params = op_params
 
-        self.serializers = self.layout.available_modalities
+        self.serializers = dict(self.transport.manifest.available_modalities)
         # get a copy of all available modalities in layout
         self._capabilities = list(
             self.serializers.keys()
@@ -76,11 +78,14 @@ class LayoutSource(IteratableRootBase):
                        sample,
                        requires):
 
+        if "__key__" not in sample:
+            raise ValueError("Transport samples require __key__")
         out = {
             "sample_id": sample["__key__"],
-            "__shard__": sample["__shard__"],
-            "domain": self.layout.domain,
+            "domain": self.domain,
         }
+        if "__shard__" in sample:
+            out["__shard__"] = sample["__shard__"]
 
         available = {
             k: v
@@ -104,7 +109,11 @@ class LayoutSource(IteratableRootBase):
             )
 
             # serialization -> loader
-            loader = FILETYPE_LOADERS[serialization]
+            loader = FILETYPE_LOADERS.get(serialization)
+            if serialization is not None and loader is None:
+                raise ValueError(
+                    f"Unknown serialization {serialization!r} for modality {required!r}"
+                )
 
             # check and load lazy modalities
             payload = available[required]
@@ -113,7 +122,7 @@ class LayoutSource(IteratableRootBase):
                 payload = payload.load()
 
             # deserialize transport payload
-            out[required] = loader(payload)
+            out[required] = payload if serialization is None else loader(payload)
 
         return out
 
@@ -142,10 +151,12 @@ class LayoutSource(IteratableRootBase):
     # -------------------------------------------------
     def _shuffle_buffered_by_shard(self, samples, size):
 
-        for _, shard_samples in groupby(
-            samples,
-            key=lambda sample: sample["__shard__"],
-        ):
+        def shard_key(sample):
+            if sample.get("__shard__") is None:
+                raise ValueError("Partition-based shuffle requires __shard__ on every sample")
+            return sample["__shard__"]
+
+        for _, shard_samples in groupby(samples, key=shard_key):
             yield from self._shuffle_buffered(
                 shard_samples,
                 size,
@@ -176,7 +187,7 @@ class LayoutSource(IteratableRootBase):
         if not self._deliverables:
             return
 
-        samples = self.layout.transport.iter_samples(
+        samples = self.transport.iter_samples(
             deliverables=self._deliverables,
             load_policy=self.load_policy,
             shardshuffle=self.op_params.shardshuffle,
@@ -190,6 +201,8 @@ class LayoutSource(IteratableRootBase):
             )
 
         for sample in samples:
+            if self.op_params.shardshuffle and sample.get("__shard__") is None:
+                raise ValueError("Shard shuffle requires __shard__ on every sample")
             data = self._decode_sample(
                 sample,
                 self._deliverables

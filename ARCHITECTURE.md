@@ -47,8 +47,9 @@ runweaver_ml
 
 The root package exposes the package version only. Stable-looking convenience
 imports live in `runweaver_ml.phase_control`, `runweaver_ml.dataset_management`,
-and `runweaver_ml.utils`; lower-level transport and layout types remain internal
-implementation details even though Python users can import them directly.
+and `runweaver_ml.utils`; TransportBase, TransportManifest, DeferredPayload, and MemoryTransport are
+public extension types exposed by runweaver_ml.dataset_management. Lower-level
+layout types remain implementation details.
 
 ## Runtime overview
 
@@ -156,6 +157,10 @@ loop methods with an already prepared trainer, optimizer, and loaders. Loop
 steps and target schedules are phase-local. This keeps dataset selection,
 optimizer policy, and concrete model construction outside RunWeaver.
 
+Sequential phases do not imply continuity of optimizers, schedulers, 
+parameters, or execution state. The application reconstructs phase-specific 
+execution infrastructure.
+
 Validation ownership is selected when constructing `TrainingModule`: either
 the trainer implements the complete metric lifecycle or the module uses its
 metric and collector handlers. Checkpoint persistence is likewise an injected
@@ -178,23 +183,37 @@ dataset root
 └── features/001.tar   s2.embedding.npy
 ```
 
-Transport produces normalized sample dictionaries. Layout decoding turns file
-payloads into Python/NumPy values and adds the dataset domain. The view then
-passes samples through ordered middleware providers.
+Transport produces normalized sample dictionaries and owns its modality manifest.
+LayoutSource consumes that manifest directly: serializer identifiers select file
+decoders, while None declares native values that pass through unchanged. It adds
+the dataset domain. DatasetLayout has been removed; local root validation belongs
+to TarTransport. The view then passes samples through ordered middleware providers.
 
-Lazy loading uses `DeferredPayload` for requested single-modality fragments.
+TAR lazy loading uses `DeferredPayload` for requested single-modality fragments.
 It is disabled for a fragment when multiple requested modalities in that same
-fragment would require mixed eager/lazy behavior.
+fragment would require mixed eager/lazy behavior. Deferred TAR payloads share
+reference-counted indexed readers, with serialized access to their seek state.
+Readers close when the last outstanding loader releases ownership, including
+failed loads and abandoned payloads. Iterator shutdown abandons only undelivered
+payloads, so delivered payloads can outlive their iterator. Failed loads release
+their loader state; retry requires a fresh payload. Eager WebDataset streams are
+explicitly owned by TarTransport and closed on exit.
 
 ### Dataset pipeline
 
 `MultimodalDataset` composes:
 
-- a `DatasetLayout` and `TarTransport`;
+- a supplied transport, or `TarTransport` constructed from a local root;
 - an `ArtifactStore` for dataset-scoped values;
-- metadata loading or generation;
+- local cached metadata for default TAR construction, or an explicit/transport
+  sample count with raw-iteration fallback for supplied transports;
 - a `DatasetView` containing the root layout source and providers; and
 - a threaded `DatasetPrefetchEngine`.
+
+Default TAR metadata generation counts raw samples from the first discovered
+modality, preserving the established count universe. It requests deferred
+payloads and explicitly abandons them without decoding or running providers.
+Metadata caching and its JSON format are unchanged.
 
 Artifacts are dataset-level values or state. Providers are sample-aware
 middleware that consume existing capabilities and add runtime values. Provider
@@ -203,6 +222,9 @@ installation validates both required artifacts and required input capabilities.
 Artifact and provider base classes populate registries through subclass
 registration. The framework contains the construction mechanism but does not
 ship concrete application-specific extensions.
+
+See [transport extension contract](docs/TRANSPORT_EXTENSIONS.md) for the public
+interface, construction examples, and compatibility changes.
 
 ### Multiple datasets and batching
 
@@ -215,8 +237,10 @@ ship concrete application-specific extensions.
 Exhaustion can loop, consume all datasets, or stop when the first mixed dataset
 is exhausted. A domain filter can restrict active datasets.
 
-`DynamicCollator` always emits identity fields (`sample_id`, `__shard__`, and
-`domain`) and assembles requested modalities by type. It recursively collates
+`DynamicCollator` emits `sample_id` and `domain`, preserves optional `__shard__`
+values in aligned lists when supplied, and assembles requested modalities by type.
+Ordinary sample delivery does not require shard identity; partition-based shuffle
+and providers declaring `requires = ["__shard__", ...]` require it explicitly. It recursively collates
 structured dictionaries, stacks NumPy arrays, tensorizes numeric scalars, and
 leaves strings, WAV payloads, and unsupported values as lists. Missing strings,
 integers, and floats receive explicit placeholder values; other partially
@@ -262,7 +286,8 @@ actual implemented schema and should be exercised by tests when practical.
   loop, although AMP disables itself when CUDA is unavailable.
 - Artifact/provider registry population depends on concrete subclasses being
   imported before configuration is built.
-- Dataset metadata and synchronized tar layouts assume local filesystem access.
+- Default TAR metadata caching and TAR discovery assume local filesystem access;
+  supplied transports do not require local paths or metadata files.
 
 ## Design rules
 

@@ -1,9 +1,6 @@
 from pathlib import Path
 import torch
 
-from .layout.dataset_layout import (
-    DatasetLayout,
-)
 from .layout.dataset_layout_source import (
     LayoutSource, LayoutOpParams)
 from .transport.tar_transport import TarTransport
@@ -18,7 +15,7 @@ from runweaver_ml.dataset_management.artifacts import (
 )
 
 from .metadata import (
-    MetadataLoader
+    MetadataLoader, DatasetMetadata
 )
 
 _ITERATION_END = object()
@@ -28,8 +25,10 @@ class MultimodalDataset(torch.utils.data.IterableDataset):
 
     def __init__(
             self,
-            root,
+            root=None,
             *,
+            transport=None,
+            num_samples=None,
             requires=None,
             load_policy=[],
             op_params=None,
@@ -39,7 +38,12 @@ class MultimodalDataset(torch.utils.data.IterableDataset):
             bias: float = 1.0,
             prefetch_workers=1
     ):
-        self.root = Path(root)
+        default_transport = transport is None
+        if default_transport and root is None:
+            raise ValueError("Supply a dataset root or a transport")
+        if not default_transport and not domain:
+            raise ValueError("An explicit domain is required with a supplied transport")
+        self.root = Path(root) if root is not None else None
         self.domain = domain or self.root.name
         self.bias = bias
         self.op_params = op_params or {}
@@ -47,11 +51,8 @@ class MultimodalDataset(torch.utils.data.IterableDataset):
         self.runtime_artifact_repository = runtime_artifact_repository
         self._wait_report = {}
 
-        self.layout = DatasetLayout(
-            domain=self.domain,
-            root=self.root,
-            transport=TarTransport(self.root),
-        )
+        self.transport = TarTransport(self.root) if default_transport else transport
+        self.available_modalities = dict(self.transport.manifest.available_modalities)
 
         # Register static artifacts before the immutable source contract is built.
         self.artifact_store = ArtifactStore()
@@ -60,24 +61,41 @@ class MultimodalDataset(torch.utils.data.IterableDataset):
         for artifact in artifacts:
             self.artifact_store.register(artifact)
 
-        self.metadata = MetadataLoader.load_or_generate(self)
-
-        print(self.layout.summary(),
-              f"Total samples: {self.metadata.num_samples}")
-
-        ls_params = LayoutOpParams(
-            **self.op_params.get("layout", {})
-        )
-
+        ls_params = LayoutOpParams(**self.op_params.get("layout", {}))
         self.view = self.create_view(
             op_params=ls_params,
             load_policy=load_policy,
-            # required=list(self.layout.available_modalities.keys())
             required=(
                 requires
                 if requires is not None
-                else list(self.layout.available_modalities.keys())
+                else list(self.available_modalities.keys())
             )
+        )
+
+        if num_samples is None and default_transport:
+            # Preserve the existing local TAR metadata cache only for default construction.
+            self.metadata = MetadataLoader.load_or_generate(self)
+        else:
+            count = num_samples
+            if count is None and ls_params.anchor_modality is None:
+                count = self.transport.num_samples
+            if count is None:
+                # Count raw identities without decoding or resolving deferred payloads.
+                count = sum(
+                    1 for _ in self.transport.iter_samples(
+                        deliverables=self.view.root.deliverables,
+                        load_policy=list(self.available_modalities),
+                        anchor_modality=ls_params.anchor_modality,
+                    )
+                )
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise ValueError("num_samples must be a nonnegative integer")
+            self.metadata = DatasetMetadata(count, list(self.available_modalities))
+
+        print(
+            f"Dataset {self.domain}: transport={self.transport.TRANSPORT_NAME}, "
+            f"modalities={', '.join(self.available_modalities)}, "
+            f"samples={self.metadata.num_samples}"
         )
 
         self.prefetch_engine = DatasetPrefetchEngine(
@@ -98,7 +116,8 @@ class MultimodalDataset(torch.utils.data.IterableDataset):
     ) -> DatasetView:
         view = DatasetView(
             LayoutSource(
-                layout=self.layout,
+                transport=self.transport,
+                domain=self.domain,
                 load_policy=load_policy,
                 deliverables=required,
                 artifact_store=self.artifact_store,
@@ -133,7 +152,8 @@ class MultimodalDataset(torch.utils.data.IterableDataset):
         missing_inputs = [
             name
             for name in provider.requires
-            if name not in self.view.capabilities
+            # Optional identity metadata is checked by the provider per sample.
+            if name != "__shard__" and name not in self.view.capabilities
         ]
         if missing_inputs:
             raise RuntimeError(

@@ -39,7 +39,9 @@ def build_datasets(
         dataset_requires = list(cfg_group.get("requires", []))
 
         dataset = build_dataset(
-                root= d_cfg["root"],
+                root=d_cfg.get("root"),
+                transport=d_cfg.get("transport"),
+                num_samples=d_cfg.get("num_samples"),
                 required_modalities=dataset_requires,
                 load_policy= cfg_group.get("lazy",[]),
                 op_params= cfg_group.get("op_params", {}),
@@ -89,10 +91,14 @@ def build_dataset(
         prefetch_workers: int = 1,
         artifacts=None,
         runtime_artifact_repository=None,
+        transport=None,
+        num_samples=None,
 ):
 
     dataset = MultimodalDataset(
-        root= root,
+        root=root,
+        transport=transport,
+        num_samples=num_samples,
         requires= required_modalities,
         load_policy= load_policy or[],
         op_params= op_params,

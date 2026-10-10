@@ -1,4 +1,8 @@
 
+from contextlib import closing
+from threading import Lock
+from weakref import finalize
+
 import tarfile
 import random
 import  webdataset as wds
@@ -13,6 +17,48 @@ from .transport_manifest import (
 )
 
 
+class _DeferredTarReader:
+    """One indexed reader, shared only while its payload loaders need it."""
+
+    def __init__(self, archive):
+        self.archive = archive
+        self.lock = Lock()
+        self.references = 1  # Index construction owns the initial reference.
+
+    def acquire(self):
+        with self.lock:
+            self.references += 1
+
+    def release(self):
+        with self.lock:
+            self.references -= 1
+            if self.references == 0:
+                self.archive.close()
+
+    def read(self, member):
+        # TarFile (especially its gzip cursor) is not safe for concurrent seeks.
+        with self.lock:
+            with self.archive.extractfile(member) as payload:
+                return payload.read()
+
+
+class _DeferredTarLoader:
+    def __init__(self, reader, member):
+        self.reader = reader
+        self.member = member
+        reader.acquire()
+        # The callback retains the reader, never this loader. Abandoned loaders
+        # release ownership even when no explicit payload.close() was requested.
+        self._cleanup = finalize(self, reader.release)
+
+    def __call__(self):
+        return self.reader.read(self.member)
+
+    def close(self):
+        self._cleanup()
+        self.reader = None
+
+
 class TarTransport(TransportBase):
 
     TRANSPORT_NAME = "tar"
@@ -23,6 +69,10 @@ class TarTransport(TransportBase):
     )
     def __init__(self, root):
         self.root = Path(root)
+        if not self.root.exists():
+            raise FileNotFoundError(f"Dataset root does not exist: {self.root}")
+        if not self.root.is_dir():
+            raise NotADirectoryError(f"Dataset root must be a local directory: {self.root}")
         self.manifest = self.build_manifest()
 
     #-----------------------------------
@@ -106,16 +156,44 @@ class TarTransport(TransportBase):
     ):
 
         tar_path = Path(fragment.path) / shard_name
-        for sample in wds.WebDataset(
-             [str(tar_path)],
-             shardshuffle=False,
-             nodesplitter=None,
-             workersplitter=None,
-             empty_check=False
-        ):
-            #
+        yield from self._iter_tar_samples(tar_path)
 
-            yield sample
+    @staticmethod
+    def _iter_tar_samples(tar_path):
+        """Keep WebDataset grouping while explicitly owning its local stream.
+
+        WebDataset 1.0.2's StreamingOpen has no closing finally block and may
+        attach the stream to exception.args. Supply our context-managed stream
+        instead, so even retained WebDataset exceptions cannot keep it open.
+        """
+        with open(tar_path, "rb") as stream:
+            def open_owned_stream(urls):
+                for source in urls:
+                    url = source["url"]
+                    yield {"url": url, "stream": stream, "local_path": url}
+
+            dataset = wds.WebDataset(
+                [str(tar_path)], shardshuffle=False, nodesplitter=None,
+                workersplitter=None, empty_check=False, cache_size=0,
+            )
+            for index, stage in enumerate(dataset.pipeline):
+                if isinstance(stage, wds.cache.StreamingOpen):
+                    dataset.pipeline[index] = open_owned_stream
+                    break
+            else:
+                raise RuntimeError("WebDataset local stream opener was not found")
+
+            iterator = iter(dataset)
+            try:
+                yield from iterator
+            except Exception as exc:
+                # Preserve error type/message while removing WebDataset's stream
+                # argument. Tracebacks may still reference the already closed file.
+                exc.args = tuple(str(tar_path) if arg is stream else arg for arg in exc.args)
+                raise
+            finally:
+                iterator.close()
+                dataset.close()
 
     # -------------------------------------------------
     def _iter_shard(
@@ -135,35 +213,41 @@ class TarTransport(TransportBase):
         if not source_maps:
             return
 
-        # choose synchronization source
-        first = source_maps[0]
+        pending = []
+        try:
+            # choose synchronization source
+            first = source_maps[0]
+            while first:
+                key, sample = first.popitem()
+                pending.append(sample)
+                merged = dict(sample)
+                for other in source_maps[1:]:
+                    overlay = other.pop(key, None)
+                    if overlay is None:
+                        raise RuntimeError(
+                            f"Missing synchronized sample '{key}' in shard '{shard_name}'."
+                        )
+                    pending.append(overlay)
+                    merged.update({
+                        k: v for k, v in overlay.items() if not k.startswith("__")
+                    })
+                self._normalize_sample_keys(merged)
+                merged["__shard__"] = shard_name
+                # Ownership passes to the caller before yielding. Closing this
+                # iterator must never abandon already delivered payloads.
+                pending.clear()
+                yield merged
+        finally:
+            self._close_deferred_samples(pending)
+            for source_map in source_maps:
+                self._close_deferred_samples(source_map.values())
 
-        # synchronized merge
-        while first:
-            key, sample = first.popitem()
-
-            merged = dict(sample)
-
-            for other in source_maps[1:]:
-
-                overlay = other.pop(key, None)
-
-                if overlay is None:
-                    raise RuntimeError(
-                        f"Missing synchronized sample "
-                        f"'{key}' in shard '{shard_name}'."
-                    )
-
-                merged.update({
-                    k: v
-                    for k, v in overlay.items()
-                    if not k.startswith("__")
-                })
-
-            self._normalize_sample_keys(merged)
-            merged["__shard__"] = shard_name
-
-            yield merged
+    @staticmethod
+    def _close_deferred_samples(samples):
+        for sample in samples:
+            for value in sample.values():
+                if isinstance(value, DeferredPayload):
+                    value.close()
 
     # -------------------------------------------------
     def _read_shard_by_key(
@@ -193,52 +277,57 @@ class TarTransport(TransportBase):
             )
 
 
-        for fragment in (
-            self.manifest.fragments
-            if fragments is None
-            else fragments
-        ):
+        try:
+            for fragment in (
+                self.manifest.fragments
+                if fragments is None
+                else fragments
+            ):
 
-            fragment_deliverables = (
-                set(fragment.modalities.keys())
-                & deliverables
-            )
-
-            if not fragment_deliverables:
-                continue
-
-            lazy_hits = (
-                    fragment_deliverables
-                    & lazy_modalities
-            )
-
-            use_lazy = bool(lazy_hits)
-
-            # Hybrid delivered fragment:
-            # disable lazy because WDS/tar sample grouping would mix eager/lazy
-            # behavior inside the same fragment.
-            if use_lazy and len(fragment_deliverables) > 1:
-                print(
-                    f"[WARN] Lazy loading disabled for fragment "
-                    f"'{fragment.id}' in shard '{shard_name}' because "
-                    f"it contains multiple requested modalities: "
-                    f"{sorted(fragment_deliverables)}"
-                )
-                use_lazy = False
-
-            if use_lazy:
-                by_key = self._lazy_fragment_map(
-                    fragment=fragment,
-                    shard_name=shard_name,
-                    modality=next(iter(lazy_hits)),
-                )
-            else:
-                by_key = self._eager_fragment_map(
-                    fragment=fragment,
-                    shard_name=shard_name,
+                fragment_deliverables = (
+                    set(fragment.modalities.keys())
+                    & deliverables
                 )
 
-            source_maps.append(by_key)
+                if not fragment_deliverables:
+                    continue
+
+                lazy_hits = (
+                        fragment_deliverables
+                        & lazy_modalities
+                )
+
+                use_lazy = bool(lazy_hits)
+
+                # Hybrid delivered fragment:
+                # disable lazy because WDS/tar sample grouping would mix eager/lazy
+                # behavior inside the same fragment.
+                if use_lazy and len(fragment_deliverables) > 1:
+                    print(
+                        f"[WARN] Lazy loading disabled for fragment "
+                        f"'{fragment.id}' in shard '{shard_name}' because "
+                        f"it contains multiple requested modalities: "
+                        f"{sorted(fragment_deliverables)}"
+                    )
+                    use_lazy = False
+
+                if use_lazy:
+                    by_key = self._lazy_fragment_map(
+                        fragment=fragment,
+                        shard_name=shard_name,
+                        modality=next(iter(lazy_hits)),
+                    )
+                else:
+                    by_key = self._eager_fragment_map(
+                        fragment=fragment,
+                        shard_name=shard_name,
+                    )
+
+                source_maps.append(by_key)
+        except BaseException:
+            for source_map in source_maps:
+                self._close_deferred_samples(source_map.values())
+            raise
 
         return source_maps
 
@@ -269,19 +358,14 @@ class TarTransport(TransportBase):
     ):
         by_key = {}
 
-        for sample in self._iter_source_shard(
-                fragment,
-                shard_name
-        ):
-            key = sample["__key__"]
-
-            if key in by_key:
-                raise RuntimeError(
-                    f"Duplicate sample key '{key}' "
-                    f"in shard '{shard_name}'."
-                )
-
-            by_key[key] = sample
+        with closing(self._iter_source_shard(fragment, shard_name)) as samples:
+            for sample in samples:
+                key = sample["__key__"]
+                if key in by_key:
+                    raise RuntimeError(
+                        f"Duplicate sample key '{key}' in shard '{shard_name}'."
+                    )
+                by_key[key] = sample
 
         return by_key
 
@@ -300,41 +384,30 @@ class TarTransport(TransportBase):
         """
 
         tar_path = Path(fragment.path) / shard_name
-        tar = tarfile.open(tar_path, "r:*")
-
         by_key = {}
-
-        for member in tar.getmembers():
-
-            if not member.isfile():
-                continue
-
-            parsed = self._parse_member_name(member.name)
-            if parsed is None:
-                continue
-
-            key, member_modality, payload_key = parsed
-
-            if member_modality != modality:
-                continue
-
-            if key not in by_key:
-                by_key[key] = {
-                    "__key__": key,
-                }
-
-            if payload_key in by_key[key]:
-                raise RuntimeError(
-                    f"Duplicate payload '{payload_key}' "
-                    f"for key '{key}' in shard '{shard_name}'."
-                )
-
-            by_key[key][payload_key] = DeferredPayload(
-                lambda tar=tar, member=member: (
-                    tar.extractfile(member).read()
-                )
-            )
-
+        reader = _DeferredTarReader(tarfile.open(tar_path, "r:*"))
+        try:
+            for member in reader.archive.getmembers():
+                if not member.isfile():
+                    continue
+                parsed = self._parse_member_name(member.name)
+                if parsed is None:
+                    continue
+                key, member_modality, payload_key = parsed
+                if member_modality != modality:
+                    continue
+                by_key.setdefault(key, {"__key__": key})
+                if payload_key in by_key[key]:
+                    raise RuntimeError(
+                        f"Duplicate payload '{payload_key}' for key '{key}' "
+                        f"in shard '{shard_name}'."
+                    )
+                by_key[key][payload_key] = DeferredPayload(_DeferredTarLoader(reader, member))
+        except BaseException:
+            self._close_deferred_samples(by_key.values())
+            raise
+        finally:
+            reader.release()
         return by_key
 
     # -------------------------------------------------
@@ -443,15 +516,5 @@ class TarTransport(TransportBase):
                 / fragment.shard_names[0]
         )
 
-        sample = next(
-            iter(
-                wds.WebDataset(
-                    [str(first_tar)],
-                    shardshuffle=False,
-                    nodesplitter=None,
-                    workersplitter=None,
-                    empty_check=False
-                )
-            )
-        )
-        return sample
+        with closing(TarTransport._iter_tar_samples(first_tar)) as samples:
+            return next(samples)

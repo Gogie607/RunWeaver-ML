@@ -6,7 +6,6 @@ from pathlib import Path
 import numpy as np
 
 from runweaver_ml.dataset_management.artifacts import ArtifactStore
-from runweaver_ml.dataset_management.engine.layout.dataset_layout import DatasetLayout
 from runweaver_ml.dataset_management.engine.layout.dataset_layout_source import (
     LayoutOpParams,
     LayoutSource,
@@ -40,18 +39,14 @@ def _write_tar(path, samples):
                 tar.addfile(info, io.BytesIO(encoded))
 
 
-def _build_layout(root):
-    transport = TarTransport(root)
-    return DatasetLayout(
-        domain="test-domain",
-        root=root,
-        transport=transport,
-    )
+def _build_transport(root):
+    return TarTransport(root)
 
 
 def _build_source(layout, required, load_policy=(), op_params=None):
     return LayoutSource(
-        layout=layout,
+        transport=layout,
+        domain="test-domain",
         load_policy=load_policy,
         deliverables=required,
         artifact_store=ArtifactStore(),
@@ -59,14 +54,11 @@ def _build_source(layout, required, load_policy=(), op_params=None):
     )
 
 
-def _build_layout_with_manifest_only():
+def _build_transport_with_manifest_only():
 
-    class Layout:
-
-        domain = "test-domain"
-        available_modalities = {}
-
-    return Layout()
+    from types import SimpleNamespace
+    from runweaver_ml.dataset_management.engine.transport import TransportManifest
+    return SimpleNamespace(manifest=TransportManifest())
 
 
 class TarTransportLayoutBoundaryTest(unittest.TestCase):
@@ -81,19 +73,18 @@ class TarTransportLayoutBoundaryTest(unittest.TestCase):
             _write_tar(text_dir / "000.tar", {"s1": {"text.txt": _txt_bytes("hello")}})
             _write_tar(vector_dir / "000.tar", {"s1": {"embedding.npy": _npy_bytes([1, 2])}})
 
-            layout = _build_layout(root)
+            layout = _build_transport(root)
 
             self.assertEqual(
-                layout.available_modalities,
+                layout.manifest.available_modalities,
                 {
                     "text": "txt",
                     "embedding": "npy",
                 },
             )
-            self.assertEqual(
-                layout.transport.manifest.available_modalities,
-                layout.available_modalities,
-            )
+            source = _build_source(layout, ["text"])
+            self.assertEqual(source.serializers, layout.manifest.available_modalities)
+            self.assertIsNot(source.serializers, layout.manifest.available_modalities)
 
     def test_one_fragment_dataset_yields_decoded_view_samples(self):
         with self.tmp_dir() as root:
@@ -107,7 +98,7 @@ class TarTransportLayoutBoundaryTest(unittest.TestCase):
                 },
             )
 
-            view = DatasetView(_build_source(_build_layout(root), ["text"]))
+            view = DatasetView(_build_source(_build_transport(root), ["text"]))
             samples = list(view)
 
             by_id = {sample["sample_id"]: sample for sample in samples}
@@ -154,7 +145,7 @@ class TarTransportLayoutBoundaryTest(unittest.TestCase):
             )
 
             samples = list(
-                DatasetView(_build_source(_build_layout(root), ["text", "embedding"]))
+                DatasetView(_build_source(_build_transport(root), ["text", "embedding"]))
             )
 
             by_id = {sample["sample_id"]: sample for sample in samples}
@@ -179,7 +170,7 @@ class TarTransportLayoutBoundaryTest(unittest.TestCase):
             _write_tar(text_dir / "000.tar", {"s1": {"text.txt": _txt_bytes("hello")}})
             _write_tar(vector_dir / "000.tar", {"s2": {"embedding.npy": _npy_bytes([1])}})
 
-            view = DatasetView(_build_source(_build_layout(root), ["text", "embedding"]))
+            view = DatasetView(_build_source(_build_transport(root), ["text", "embedding"]))
 
             with self.assertRaisesRegex(RuntimeError, "Missing synchronized sample"):
                 list(view)
@@ -204,7 +195,7 @@ class TarTransportLayoutBoundaryTest(unittest.TestCase):
             )
 
             source = _build_source(
-                _build_layout(root),
+                _build_transport(root),
                 ["text", "response"],
                 op_params=LayoutOpParams(anchor_modality="response"),
             )
@@ -245,7 +236,7 @@ class TarTransportLayoutBoundaryTest(unittest.TestCase):
 
             view = DatasetView(
                 _build_source(
-                    _build_layout(root),
+                    _build_transport(root),
                     ["text", "response"],
                 )
             )
@@ -267,7 +258,7 @@ class TarTransportLayoutBoundaryTest(unittest.TestCase):
                 "anchor modality must be part of the required contract",
             ):
                 _build_source(
-                    _build_layout(root),
+                    _build_transport(root),
                     ["text"],
                     op_params=LayoutOpParams(anchor_modality="response"),
                 )
@@ -282,7 +273,7 @@ class TarTransportLayoutBoundaryTest(unittest.TestCase):
             _write_tar(text_dir / "000.tar", {"s1": {"text.txt": _txt_bytes("hello")}})
             _write_tar(vector_dir / "000.tar", {"s1": {"embedding.npy": _npy_bytes([1])}})
 
-            samples = list(DatasetView(_build_source(_build_layout(root), ["text"])))
+            samples = list(DatasetView(_build_source(_build_transport(root), ["text"])))
 
             self.assertEqual(
                 samples,
@@ -302,9 +293,9 @@ class TarTransportLayoutBoundaryTest(unittest.TestCase):
             vector_dir.mkdir()
             _write_tar(vector_dir / "000.tar", {"s1": {"embedding.npy": _npy_bytes([5, 6])}})
 
-            layout = _build_layout(root)
+            layout = _build_transport(root)
             raw_sample = next(
-                layout.transport.iter_samples(
+                layout.iter_samples(
                     deliverables=["embedding"],
                     load_policy=["embedding"],
                 )
@@ -344,7 +335,7 @@ class TarTransportLayoutBoundaryTest(unittest.TestCase):
             _write_tar(text_dir / "001.tar", {"s2": {"text.txt": _txt_bytes("two")}})
 
             source = _build_source(
-                _build_layout(root),
+                _build_transport(root),
                 ["text"],
                 op_params=LayoutOpParams(
                     shuffle=True,
@@ -378,7 +369,7 @@ class TarTransportLayoutBoundaryTest(unittest.TestCase):
                 }
 
         source = _build_source(
-            _build_layout_with_manifest_only(),
+            _build_transport_with_manifest_only(),
             [],
             op_params=LayoutOpParams(
                 shuffle=True,

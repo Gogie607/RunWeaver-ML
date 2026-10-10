@@ -2,6 +2,7 @@
 import json
 
 from .dataset_metadata import DatasetMetadata
+from ..transport.transport_base import DeferredPayload
 
 
 class MetadataLoader:
@@ -65,20 +66,32 @@ class MetadataLoader:
         # authoritative modality
         #
         modality = next(
-            iter(dataset.layout.available_modalities)
+            iter(dataset.available_modalities)
         )
 
-        view = dataset.create_view(required=[modality])
-
+        # Count the same authoritative modality as before, without decoding or
+        # materializing its payloads. Counting has no consumer for deferred data,
+        # so explicitly abandon each loader rather than waiting for collection.
+        samples = dataset.transport.iter_samples(
+            deliverables=[modality],
+            load_policy=[modality],
+        )
         count = 0
-
-        for _ in view:
-            count += 1
+        try:
+            for sample in samples:
+                count += 1
+                for value in sample.values():
+                    if isinstance(value, DeferredPayload):
+                        value.close()
+        finally:
+            close = getattr(samples, "close", None)
+            if close is not None:
+                close()
 
         meta = DatasetMetadata(
             num_samples=count,
             available_modalities=list(
-                dataset.layout.available_modalities
+                dataset.available_modalities
             )
         )
 

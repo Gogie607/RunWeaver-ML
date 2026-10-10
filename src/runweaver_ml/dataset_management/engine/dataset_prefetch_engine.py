@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from queue import Full, Queue
+from queue import Empty, Full, Queue
 from threading import Event, Thread
 from typing import Iterator
+
+from .transport.transport_base import DeferredPayload
 
 
 _END = object()
@@ -84,6 +86,16 @@ class DatasetPrefetchEngine:
             for worker in workers:
                 worker.join(timeout=1.0)
 
+            # Retained exception tracebacks may keep this frame and its queues
+            # alive. Explicitly abandon samples that will never be delivered.
+            for queue in (raw_queue, ready_queue):
+                while True:
+                    try:
+                        item = queue.get_nowait()
+                    except Empty:
+                        break
+                    self._close_deferred_sample(item)
+
     # -------------------------------------------------
 
     def _fetch_loop(
@@ -92,10 +104,13 @@ class DatasetPrefetchEngine:
         stop_event: Event,
     ) -> None:
 
+        root_iterator = None
         try:
-            for sample in self.pipeline.iter_root():
+            root_iterator = self.pipeline.iter_root()
+            for sample in root_iterator:
 
                 if stop_event.is_set():
+                    self._close_deferred_sample(sample)
                     break
 
                 if not self._put(
@@ -103,6 +118,7 @@ class DatasetPrefetchEngine:
                     sample,
                     stop_event,
                 ):
+                    self._close_deferred_sample(sample)
                     break
 
         except BaseException as exc:
@@ -114,6 +130,14 @@ class DatasetPrefetchEngine:
 
 
         finally:
+            try:
+                close = getattr(root_iterator, "close", None)
+                if close is not None:
+                    close()
+            except BaseException as exc:
+                self._put(raw_queue, exc, stop_event)
+            finally:
+                root_iterator = None
             for _ in range(self.num_workers):
                 self._put(
                     raw_queue,
@@ -133,7 +157,10 @@ class DatasetPrefetchEngine:
         try:
             while not stop_event.is_set():
 
-                item = raw_queue.get()
+                try:
+                    item = raw_queue.get(timeout=0.1)
+                except Empty:
+                    continue
 
                 if item is _END:
                     break
@@ -141,9 +168,11 @@ class DatasetPrefetchEngine:
                 if isinstance(item, BaseException):
                     raise item
 
-                sample = self.pipeline.process_sample(
-                    item
-                )
+                try:
+                    sample = self.pipeline.process_sample(item)
+                except BaseException:
+                    self._close_deferred_sample(item)
+                    raise
 
                 if sample is not None:
                     if not self._put(
@@ -151,6 +180,7 @@ class DatasetPrefetchEngine:
                         sample,
                         stop_event,
                     ):
+                        self._close_deferred_sample(sample)
                         break
 
         except BaseException as exc:
@@ -168,6 +198,13 @@ class DatasetPrefetchEngine:
             )
 
     # -------------------------------------------------
+
+    @staticmethod
+    def _close_deferred_sample(sample):
+        if isinstance(sample, dict):
+            for value in sample.values():
+                if isinstance(value, DeferredPayload):
+                    value.close()
 
     @staticmethod
     def _put(

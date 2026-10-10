@@ -1,6 +1,10 @@
 """Dataset construction, multimodal loading, and batching utilities."""
 
 __all__ = [
+    "TransportBase",
+    "TransportManifest",
+    "DeferredPayload",
+    "MemoryTransport",
     "DatasetPrefetchEngine",
     "DatasetView",
     "DynamicCollator",
@@ -15,6 +19,9 @@ __all__ = [
 
 def __getattr__(name):
     """Load public dataset helpers lazily and avoid package import cycles."""
+    if name in {"TransportBase", "TransportManifest", "DeferredPayload", "MemoryTransport"}:
+        from .engine import transport
+        return getattr(transport, name)
     if name == "build_dataset":
         from .build_dataloader import build_dataset
         return build_dataset

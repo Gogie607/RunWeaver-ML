@@ -21,17 +21,19 @@ class DynamicCollator:
                 x["sample_id"]
                 for x in batch
             ],
-            "__shard__": [
-                x["__shard__"]
-                for x in batch
-            ],
             "domain": [
                 x.get("domain")
                 for x in batch
             ]
         }
 
+        if any(sample.get("__shard__") is not None for sample in batch):
+            # Keep row alignment without inventing identities for shardless rows.
+            out["__shard__"] = [sample.get("__shard__") for sample in batch]
+
         for modality in self.modalities:
+            if modality in {"sample_id", "domain", "__shard__"}:
+                continue
 
             vals = [
                 sample.get(modality)
