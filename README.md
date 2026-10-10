@@ -106,6 +106,62 @@ No archive files or special directory layout are needed. The transport supplies 
 
 For a custom transport, implement the public `TransportBase` contract and supply it to `MultimodalDataset` the same way. See [Transport extensions](docs/TRANSPORT_EXTENSIONS.md).
 
+### Add processing through configuration
+
+Keep the same `transport` from the quick start. An application-defined provider
+can append a word to each sample without changing the transport or consuming loop:
+
+```python
+from runweaver_ml.dataset_management import build_datasets
+from runweaver_ml.dataset_management.source import ProviderBase
+
+
+class AppendWordProvider(ProviderBase):
+    provider_name = "readme_append_word"
+    requires = ["text"]
+    capabilities = ["text"]
+
+    def __init__(self, word):
+        super().__init__()
+        self.word = word
+
+    def process(self, sample, view):
+        sample["text"] = f"{sample['text']} {self.word}"
+        return sample
+
+
+config = {
+    "requires": ["text", "label"],
+    "providers": [
+        {"name": "readme_append_word", "config": {"word": "RunWeaver"}},
+    ],
+    "datasets": [{"name": "demo", "transport": transport}],
+}
+
+dataset = build_datasets(config)
+loader = create_loader(dataset, config["requires"], batch_size=2)
+
+for batch in loader:
+    print(batch)
+```
+
+The resulting text is `hello RunWeaver` and `world RunWeaver`. Change `word` to
+change the output; remove the `providers` entry and rebuild to restore `hello`
+and `world`. The transport, loader construction, and print-only loop stay the same.
+
+Defining or importing the provider class registers it with DSM's existing
+mechanism. `build_datasets()` passes the configuration to `build_dataset()`, which
+constructs and installs a separate provider for each dataset. The application
+never instantiates or calls the provider itself.
+
+Run [the complete demonstration](scripts/demo_memory_provider.py) to see both
+configured and original samples using the same transport:
+
+```bash
+python scripts/demo_memory_provider.py
+python scripts/demo_memory_provider.py --word research
+```
+
 ## Dataset Management: storage is only the beginning
 
 ```text

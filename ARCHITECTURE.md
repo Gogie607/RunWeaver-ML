@@ -288,6 +288,13 @@ Counting samples does not validate serialized payload contents.
 
 `DatasetView` passes samples through ordered middleware providers. Providers are application-defined and can enrich, filter, or otherwise process samples.
 
+`build_dataset(..., providers=...)` constructs and installs configured providers
+in declaration order using the existing provider registry. `build_datasets()`
+delegates its group-level provider configuration to that singular builder for
+each dataset, creating separate provider instances. Provider entries use
+`name`, optional `handler`, and constructor settings under `config`;
+application-defined provider modules must be imported before building datasets.
+
 Provider installation checks required input capabilities and artifacts. A provider that needs partition identity declares it explicitly, for example:
 
 ```python

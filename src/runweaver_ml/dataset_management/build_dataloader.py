@@ -49,15 +49,13 @@ def build_datasets(
                 bias=d_cfg.get("bias", 1.0),
                 prefetch_workers=d_cfg.get("prefetch_workers", 1),
                 runtime_artifact_repository=runtime_artifact_repository,
+                providers=cfg_group.get("providers", []),
                 artifacts=create_artifacts(
                     cfg_group.get("artifacts", []),
                     d_cfg,
                 )
 
             )
-
-        for provider in create_providers(cfg_group.get("providers", [])):
-            dataset.install_provider(provider)
 
         datasets.append(dataset)
 
@@ -93,7 +91,13 @@ def build_dataset(
         runtime_artifact_repository=None,
         transport=None,
         num_samples=None,
+        providers=None,
 ):
+    """Build one dataset and install configured providers in declaration order.
+
+    Provider entries use the existing name/handler/config factory format.
+    Application-defined provider modules must be imported before construction.
+    """
 
     dataset = MultimodalDataset(
         root=root,
@@ -109,6 +113,9 @@ def build_dataset(
         runtime_artifact_repository=runtime_artifact_repository,
 
     )
+    for provider in create_providers(providers):
+        dataset.install_provider(provider)
+
     return dataset
 
 # Parameter based connecting a loader and collator from existing datasets

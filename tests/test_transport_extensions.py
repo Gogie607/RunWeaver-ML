@@ -8,7 +8,7 @@ import numpy as np
 
 from runweaver_ml.dataset_management import (
     DeferredPayload, MemoryTransport, MultimodalDataset, TransportBase,
-    TransportManifest, DynamicCollator, build_datasets, create_loader,
+    TransportManifest, DynamicCollator, build_dataset, build_datasets, create_loader,
 )
 from runweaver_ml.dataset_management.artifacts import Artifact
 from runweaver_ml.dataset_management.source import ProviderBase
@@ -23,6 +23,22 @@ class UppercaseProvider(ProviderBase):
         if sample["text"] == "skip":
             return None
         sample["upper"] = sample["text"].upper() + view.artifacts.get("suffix").value()
+        return sample
+
+
+class ConfiguredSuffixProvider(ProviderBase):
+    provider_name = "test_configured_suffix"
+    requires = ["text"]
+    capabilities = ["text"]
+
+    def __init__(self, suffix):
+        super().__init__()
+        self.suffix = suffix
+        self.calls = 0
+
+    def process(self, sample, view):
+        self.calls += 1
+        sample["text"] += self.suffix
         return sample
 
 
@@ -72,6 +88,36 @@ class ShardWriterProvider(ProviderBase):
 
 
 class TransportExtensionTest(unittest.TestCase):
+    def test_singular_builder_installs_ordered_providers_and_preserves_transport(self):
+        transport = MemoryTransport([{"__key__": 1, "text": "hello"}])
+        settings = dict(root=None, transport=transport, required_modalities=["text"],
+                        load_policy=[], op_params={}, domain="demo", bias=1.0)
+        configured = build_dataset(**settings, providers=[
+            {"name": "test_configured_suffix", "config": {"suffix": " A"}},
+            {"name": "second", "handler": "test_configured_suffix",
+             "config": {"suffix": " B"}},
+        ])
+        self.assertEqual(next(iter(create_loader(configured, ["text"], 1)))["text"],
+                         ["hello A B"])
+        original = build_dataset(**settings)
+        self.assertEqual(next(iter(create_loader(original, ["text"], 1)))["text"],
+                         ["hello"])
+
+    def test_plural_builder_creates_independent_providers_without_double_installation(self):
+        manager = build_datasets({
+            "requires": ["text"],
+            "providers": [{"name": "test_configured_suffix", "config": {"suffix": "!"}}],
+            "datasets": [
+                {"name": name, "transport": MemoryTransport([{"__key__": 1, "text": name}])}
+                for name in ("one", "two")
+            ],
+        })
+        self.assertEqual([sample["text"] for sample in manager], ["one!", "two!"])
+        first = manager.datasets[0].view.pipeline[0]
+        second = manager.datasets[1].view.pipeline[0]
+        self.assertIsNot(first, second)
+        self.assertEqual((first.calls, second.calls), (1, 1))
+
     def test_memory_end_to_end_with_provider_filter_artifact_and_reiteration(self):
         dataset = MultimodalDataset(
             transport=MemoryTransport([
