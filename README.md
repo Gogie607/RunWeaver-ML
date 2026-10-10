@@ -5,11 +5,27 @@
 RunWeaver ML is a lightweight, model-agnostic Python framework for experimental machine learning. It separates two recurring engineering problems from the experiments themselves:
 
 - **Phase Control:** coordinate multi-phase training, scheduled parameters, objectives, validation, and the training loop.
-- **Dataset Management (DSM):** connect storage to a reusable pipeline for decoding, providers, artifacts, prefetching, dataset mixing, and PyTorch batching.
+- **Dataset Management (DSM):** load samples, prepare the data your model needs, combine datasets, and deliver training batches.
 
 **Use either subsystem independently, or use them together.** RunWeaver does not require a particular model, experiment layout, or storage format.
 
 > **Bring your own storage backend. Keep the RunWeaver processing pipeline.**
+
+### What does that mean in practice?
+
+Suppose your application trains a model on audio recordings. You need to load recordings, turn them into model inputs, group them into batches, and train in several stages with different objectives. RunWeaver can handle the repeatable parts of that workflow. **You still write the model and decide how it learns.**
+
+A few terms used throughout this project:
+
+| Term | Plain-English meaning |
+| --- | --- |
+| **Transport** | How samples arrive from storage, memory, or another source. |
+| **Provider** | Application-supplied processing that adds information to a sample or decides whether to keep it. For example, preparing audio features. |
+| **Artifact** | A dataset-level value or resource made available to processing components. It is **not** automatically a saved model or a cached output. |
+| **Collator** | Combines individual samples into a batch your training code can use. |
+| **Phase** | One stage of training, with its own settings and objectives. |
+
+You don't have to use every component. Dataset Management and Phase Control can be adopted separately.
 
 RunWeaver began as infrastructure extracted from a research application. It remains an evolving `0.1.x` library, not a turnkey experiment runner or a frozen public API.
 
@@ -83,7 +99,7 @@ for batch in loader:
     print(batch["sample_id"], batch["text"], batch["label"])
 ```
 
-No fabricated shard names, directory structure, or TAR files are needed. The transport supplies samples; RunWeaver handles the downstream pipeline.
+No archive files or special directory layout are needed. The transport supplies samples; RunWeaver handles the downstream pipeline.
 
 For a custom transport, implement the public `TransportBase` contract and supply it to `MultimodalDataset` the same way. See [Transport extensions](docs/TRANSPORT_EXTENSIONS.md).
 
@@ -113,13 +129,13 @@ TAR / Memory / your TransportBase implementation
 
 Each `MultimodalDataset` has **one transport**. `MultiDatasetManager` can combine multiple datasets, including datasets backed by different transports.
 
-**Transport** is responsible for finding and delivering samples. **Providers** are application-defined middleware that can enrich or filter samples. **Artifacts** hold dataset-scoped values. **Collation** turns delivered values into batches, with type-aware handling of tensors, arrays, scalars, strings, and other payloads.
+Transports supply samples, providers can enrich or filter them, and the collator builds batches. Artifacts supply dataset-level values to components that need them. The storage format is up to the application.
 
-The public transport contract requires a stable `__key__` per sample. `__shard__` is optional and only required by explicitly partition-aware operations or providers. A transport need not use a filesystem.
+Each sample needs a stable identifier (`__key__`). Other transport-specific identifiers are optional. See [Transport extensions](docs/TRANSPORT_EXTENSIONS.md) for the detailed contract.
 
 ### TAR remains a first-class option
 
-The default `TarTransport` discovers modality fragments under a dataset root and synchronizes samples by shard and key.
+For datasets stored in TAR archives, the included `TarTransport` can combine matching sample entries from separate modality archives.
 
 ```text
 datasets/example/
@@ -131,7 +147,7 @@ datasets/example/
     └── 001.tar
 ```
 
-The corresponding fragments must align on shard names and sample keys when they are synchronized.
+When combining these archives, their filenames and sample identifiers must correspond.
 
 A configuration-driven loader is available:
 
@@ -165,7 +181,7 @@ In mixed mode, dataset selection weights are proportional to `sqrt(num_samples) 
 
 **Large payloads need not be loaded all at once.** TAR deferred loading indexes eligible fragments and resolves their payloads on demand. Readers have explicit shared ownership, including cleanup on failure and cancellation. Metadata counting uses raw sample identities without decoding encoding payloads, avoiding a separate eager-loading spike.
 
-A sample batch always includes `sample_id` and `domain`; `__shard__` is included only when supplied. Numeric values can become tensors, arrays are stacked where appropriate, and variable-length WAV values remain lists.
+A sample batch always includes `sample_id` and `domain`; optional storage identifiers are included only when supplied. Numeric values can become tensors, arrays are stacked where appropriate, and variable-length WAV values remain lists.
 
 ## Phase Control: structure without prescribing the experiment
 
@@ -244,7 +260,7 @@ RunWeaver is intended to be extended by composition, not by copying the framewor
 - **Training behavior:** implement a trainer, objectives, model wrapper, and hooks as needed.
 - **Configuration:** construct objects in Python or translate your own YAML/configuration into the supported dictionaries. RunWeaver itself does not load YAML.
 
-Provider requirements are validated against available capabilities. Providers that need partition identity can explicitly declare `__shard__` in `requires`; ordinary providers and transports do not need it.
+Provider requirements are checked against the data available in the pipeline. Details of optional storage identifiers belong in the [transport documentation](docs/TRANSPORT_EXTENSIONS.md).
 
 ## Documentation
 
@@ -265,11 +281,5 @@ The suite covers TAR behavior, transport extension cases, sample processing, res
 RunWeaver ML is **research infrastructure**, not an all-in-one training platform. Application-level run assembly, model and optimizer creation, concrete provider implementations, logger integration, and checkpoint destinations remain application responsibilities.
 
 The library is currently at **0.1.x**, and its APIs may change as the framework matures. Contributions should preserve the one-way dependency: applications import RunWeaver, never the reverse.
-
-## Using RunWeaver ML? I'd love to hear about it!
-Whether you've integrated RunWeaver into a research project, built your own transport, or simply found something useful, I'd love to know.
-Open a GitHub Discussion or Issue and tell me what you're working on. Feedback, suggestions, and examples of real-world usage are always welcome.
-And if RunWeaver saved you some time, a GitHub star is a lovely way to show your appreciation. ⭐
-
 
 Licensed under **GPL-3.0-or-later**. See [LICENSE](LICENSE).
