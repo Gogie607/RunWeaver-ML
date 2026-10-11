@@ -43,6 +43,11 @@ class TrainLoopConfig:
     save_every: int | None
     log_every: int | None
     amp: AmpSettings
+    accumulation_steps: int = 1
+
+    def __post_init__(self):
+        if type(self.accumulation_steps) is not int or self.accumulation_steps < 1:
+            raise ValueError("gradient_accumulation.count must be a positive integer")
 
     @classmethod
     def from_config(
@@ -52,6 +57,19 @@ class TrainLoopConfig:
         max_steps: int,
     ) -> "TrainLoopConfig":
         schedule = runtime_config.get("schedule", {})
+        accumulation = runtime_config.get("gradient_accumulation", {})
+        if not isinstance(accumulation, dict):
+            raise ValueError("gradient_accumulation must be a dictionary")
+        enabled = accumulation.get("enabled", False)
+        if type(enabled) is not bool:
+            raise ValueError("gradient_accumulation.enabled must be a boolean")
+        accumulation_steps = 1
+        if enabled:
+            if "count" not in accumulation:
+                raise ValueError(
+                    "gradient_accumulation.count is required when enabled"
+                )
+            accumulation_steps = accumulation["count"]
 
         values = {
             "max_steps": max_steps,
@@ -73,4 +91,5 @@ class TrainLoopConfig:
             save_every=values["save_every"],
             log_every=values["log_every"],
             amp=AmpSettings.from_config(runtime_config.get("amp")),
+            accumulation_steps=accumulation_steps,
         )

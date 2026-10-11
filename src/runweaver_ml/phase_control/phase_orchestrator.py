@@ -20,6 +20,31 @@ class PhaseOrchestrator:
     ):
 
         step = 0
+        pending_batches = 0
+        checkpoint_pending = False
+        accumulation_steps = loop_config.accumulation_steps
+
+        def apply_update(batch_count):
+            # Every backward uses the configured divisor. A final short group
+            # needs correction to average only the batches actually consumed.
+            if batch_count != accumulation_steps:
+                correction = accumulation_steps / batch_count
+                for group in optimizer.param_groups:
+                    for parameter in group["params"]:
+                        if parameter.grad is not None:
+                            parameter.grad.mul_(correction)
+
+            updated = True
+            if use_scaler:
+                previous_scale = scaler.get_scale()
+                scaler.step(optimizer)
+                scaler.update()
+                # GradScaler skips optimizer.step on nonfinite gradients.
+                updated = scaler.get_scale() >= previous_scale
+            else:
+                optimizer.step()
+            if scheduler is not None and updated:
+                scheduler.step()
 
         trainer.on_train_begin()
         try:
@@ -35,7 +60,8 @@ class PhaseOrchestrator:
                         break
 
                     step += 1
-                    optimizer.zero_grad(set_to_none=True)
+                    if pending_batches == 0:
+                        optimizer.zero_grad(set_to_none=True)
 
                     with torch.amp.autocast(
                             'cuda',
@@ -45,16 +71,15 @@ class PhaseOrchestrator:
                         trainer.on_step_begin(step)
                         loss, payload = trainer.compute(batch)
 
+                    pending_batches += 1
                     if use_scaler:
-                        scaler.scale(loss).backward()
-                        scaler.step(optimizer)
-                        scaler.update()
+                        scaler.scale(loss / accumulation_steps).backward()
                     else:
-                        loss.backward()
-                        optimizer.step()
+                        (loss / accumulation_steps).backward()
 
-                    if scheduler is not None:
-                        scheduler.step()
+                    if pending_batches == accumulation_steps:
+                        apply_update(pending_batches)
+                        pending_batches = 0
 
                     trainer.on_train_payload(payload)
 
@@ -99,9 +124,24 @@ class PhaseOrchestrator:
                         loop_config.save_every is not None
                         and step % loop_config.save_every == 0
                     ):
+                        checkpoint_pending = True
+                    if checkpoint_pending and pending_batches == 0:
+                        trainer.on_checkpoint(optimizer, scheduler)
+                        checkpoint_pending = False
+
+                if pending_batches:
+                    apply_update(pending_batches)
+                    pending_batches = 0
+                    if checkpoint_pending:
                         trainer.on_checkpoint(optimizer, scheduler)
         finally:
-            trainer.on_train_end()
+            try:
+                # Do not carry an unfinished group into another phase after an
+                # exception. Successful final groups were applied above.
+                if pending_batches:
+                    optimizer.zero_grad(set_to_none=True)
+            finally:
+                trainer.on_train_end()
 
         return step
 

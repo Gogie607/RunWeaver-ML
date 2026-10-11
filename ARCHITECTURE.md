@@ -139,8 +139,8 @@ Model wrapper contracts provide mode changes and trainable-component selection w
 
 1. Enters the training context and advances scheduled parameters.
 2. Computes `(loss, payload)` under optional CUDA autocast.
-3. Performs backpropagation and optimizer stepping, optionally using a gradient scaler.
-4. Advances an optional learning-rate scheduler.
+3. Performs backpropagation with optional gradient accumulation and gradient scaling.
+4. Updates the optimizer and optional learning-rate scheduler at accumulation boundaries.
 5. Invokes payload/logging hooks.
 6. Runs configured validation and checkpoint hooks.
 7. Stops at the configured step limit.
@@ -150,6 +150,23 @@ Model wrapper contracts provide mode changes and trainable-component selection w
 Validation metrics may be owned by the trainer or by `TrainingModule` handlers, selected during module construction. Checkpoint persistence is injected via callbacks rather than embedded in a model wrapper.
 
 **The host remains responsible** for creating the `TrainingModule`, optimizer, loaders, logger, and phase-specific runtime. `TrainLoopConfig` configures the loop; it is not a complete run configuration.
+
+`TrainLoopConfig.from_config()` accepts an optional
+`gradient_accumulation: {enabled: true, count: N}` runtime section. Missing
+configuration disables accumulation; enabling it requires a positive integer
+count. Direct construction uses `accumulation_steps=1` by default. Accumulation
+works with existing float16/GradScaler and bfloat16 CUDA AMP paths.
+
+Phase-local steps, parameter schedules, logs and validation intervals count
+batches, preserving the existing contract. Losses are averaged over batches in
+each group, not weighted by sample count. Optimizer and LR scheduler updates
+occur once per group; a GradScaler-skipped optimizer update does not advance the
+LR scheduler. Normal completion applies and correctly normalizes a final partial
+group. Failure discards pending gradients. Checkpoint requests wait until an
+update boundary, coalescing requests within the same group; validation retains
+its batch cadence and observes the most recent completed update, potentially
+before the final partial group is flushed. Accumulation state belongs to one
+loop invocation and does not imply cross-phase optimizer or gradient continuity.
 
 ---
 

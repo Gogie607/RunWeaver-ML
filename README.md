@@ -342,6 +342,10 @@ loop_config = TrainLoopConfig.from_config(
             "dtype": "float16",
             "grad_scaler": True,
         },
+        "gradient_accumulation": {
+            "enabled": True,
+            "count": 4,
+        },
     },
     max_steps=1_000,
 )
@@ -357,6 +361,22 @@ final_step = PhaseOrchestrator.train_epoch(
 ```
 
 The example assumes your application has constructed `training_module`, `optimizer`, and the loaders. RunWeaver does **not** construct a complete training run from YAML, choose model architectures, or impose checkpoint storage.
+
+Gradient accumulation is disabled when the section or `enabled` is missing.
+When enabled, `count` is required and must be a positive integer. It works with
+both float16 AMP (including GradScaler) and bfloat16 AMP. For example, physical
+batch size 1 with `count: 4` gives an effective batch of 4 samples for full groups.
+Do not wrap the loop in another accumulation mechanism.
+
+Step limits, returned steps, parameter schedules, logging and validation still
+count consumed batches. The optimizer and optional learning-rate scheduler
+advance once per accumulation group; AMP overflow skips both updates. Batch losses
+are averaged with equal weight, and a final incomplete group is normalized by
+its actual batch count and applied on normal completion. An exception discards
+pending gradients. Checkpoint requests inside a group are coalesced and deferred
+to its update boundary, including a final incomplete group. Validation keeps its
+batch-based cadence and sees the latest completed update. Accumulation state is
+local to this loop invocation and is not carried between phases.
 
 ## Extension points
 
