@@ -305,7 +305,38 @@ The `__shard__` requirement is checked per sample before the provider processes 
 
 Artifacts are dataset-scoped values managed by an `ArtifactStore`. Providers are sample-aware middleware. The framework supplies registries and contracts, not built-in application-specific persistent providers.
 
+`store.register(name, source, overwrite=False)` stores the original Python object.
+`store.get(name)` returns a constant or invokes a callable with no arguments on
+each access; `store.item(name)` returns the original object without evaluating
+it. Callable models requiring inputs should be accessed with `item()`. Missing
+names raise `KeyError`; duplicate registration requires explicit overwrite.
+State and resource identity belong to the stored source. Distribution preserves
+shared references with `value=...`, or constructs per-dataset resources with
+`create(dataset)`.
+
+Layout `requires` selects transport and artifact fields; selected artifacts are
+resolved during sample construction and take precedence over transport fields.
+Unselected artifacts are not evaluated. Provider `artifact_requires` validates
+presence during installation without evaluating or selecting those artifacts.
+The dataset default selects transport fields; direct layout default selection
+includes all available fields. `BaseArtifact` remains a configuration construction
+record (`name`, `source`, `from_config`), with the registry and factory retained.
+The former `Artifact` runtime wrapper has been removed. Consumers must replace
+wrapper access with `get()` for values or `item()` for resources; registration
+now takes a name and source. `RuntimeArtifactRepository` is unchanged.
+
+
 Storage-aware application providers may access a concrete transport's own storage information, but **a local root path is not part of the generic transport contract**.
+
+### Composition and extensibility
+
+RunWeaver provides mechanisms for assembling and processing data without prescribing the application's interpretation of that data.
+
+Transports supply available modalities. Artifacts supply named values or resources. Layout requirements select the fields entering the sample stream. Providers extend or transform that stream.
+
+The framework guarantees defined interfaces and lifecycle rules: artifact value resolution invokes callables without arguments, layout requirements select sample fields, and configured providers process samples in declaration order. The application decides what an artifact represents, what a provider does, and how these components are combined.
+
+Artifacts are not restricted to metadata, providers are not restricted to particular transformations, and sample composition is not limited to predefined recipes. Applications are free to combine these mechanisms in ways the framework's authors did not anticipate, provided they respect those contracts. Examples illustrate possible compositions, not an exhaustive list of permitted uses.
 
 ## 4. Prefetch, dataset mixing, and collation
 

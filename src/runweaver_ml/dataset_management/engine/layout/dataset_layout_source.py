@@ -96,8 +96,7 @@ class LayoutSource(IteratableRootBase):
         for required in requires:
 
             if self.artifact_store.has(required):
-                artifact = self.artifact_store.get(required)
-                out[required] = artifact.value()
+                out[required] = self.artifact_store.get(required)
                 continue
 
             if required not in available:

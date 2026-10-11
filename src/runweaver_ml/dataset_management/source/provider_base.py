@@ -16,7 +16,7 @@ class ProviderBase( MiddlewareSourceBase):
     Providers:
         - receive each sample
         - may access the owning DatasetView as execution context
-        - may read objects from view.artifact_store
+        - may read objects from view.artifacts
         - may add, modify, or remove sample fields
 
     `requires` describes sample fields expected by the provider.

@@ -10,7 +10,6 @@ from runweaver_ml.dataset_management import (
     DeferredPayload, MemoryTransport, MultimodalDataset, TransportBase,
     TransportManifest, DynamicCollator, build_dataset, build_datasets, create_loader,
 )
-from runweaver_ml.dataset_management.artifacts import Artifact
 from runweaver_ml.dataset_management.source import ProviderBase
 
 
@@ -22,7 +21,7 @@ class UppercaseProvider(ProviderBase):
     def process(self, sample, view):
         if sample["text"] == "skip":
             return None
-        sample["upper"] = sample["text"].upper() + view.artifacts.get("suffix").value()
+        sample["upper"] = sample["text"].upper() + view.artifacts.get("suffix")
         return sample
 
 
@@ -124,7 +123,7 @@ class TransportExtensionTest(unittest.TestCase):
                 {"__key__": 1, "text": "hello", "vector": np.array([1, 2])},
                 {"__key__": 2, "text": "skip", "vector": np.array([3, 4])},
             ]),
-            domain="native", artifacts=[Artifact("suffix", "!")],
+            domain="native", artifacts={"suffix": "!"},
             prefetch_workers=2,
         )
         dataset.install_provider(UppercaseProvider())

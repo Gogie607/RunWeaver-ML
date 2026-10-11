@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from pathlib import Path
 import torch
 
@@ -11,7 +12,7 @@ from ..views.dataset_view import DatasetView
 from ..source import MiddlewareSourceBase
 
 from runweaver_ml.dataset_management.artifacts import (
-    Artifact, ArtifactStore
+    ArtifactStore
 )
 
 from .metadata import (
@@ -57,9 +58,14 @@ class MultimodalDataset(torch.utils.data.IterableDataset):
         # Register static artifacts before the immutable source contract is built.
         self.artifact_store = ArtifactStore()
 
-        artifacts = list(artifacts or [])
-        for artifact in artifacts:
-            self.artifact_store.register(artifact)
+        # Factories still return BaseArtifact construction records. Direct callers
+        # can supply a name-to-source mapping without constructing any wrapper.
+        if isinstance(artifacts, Mapping):
+            for name, source in artifacts.items():
+                self.artifact_store.register(name, source)
+        else:
+            for artifact in artifacts or []:
+                self.artifact_store.register(artifact.name, artifact.source)
 
         ls_params = LayoutOpParams(**self.op_params.get("layout", {}))
         self.view = self.create_view(
@@ -133,7 +139,7 @@ class MultimodalDataset(torch.utils.data.IterableDataset):
         """Manually append a provider to the dataset's ordered pipeline."""
 
         if not isinstance(provider, MiddlewareSourceBase):
-            raise TypeError("provider must be an artifact name, Artifact, or middleware")
+            raise TypeError("provider must be middleware")
 
         # check that any required artifacts are pre-installed
         missing = [
@@ -178,28 +184,15 @@ class MultimodalDataset(torch.utils.data.IterableDataset):
     def get_artifact_names(self, ) -> list[str]:
         return self.artifact_store.names()
 
-    def get_artifact(
-            self,
-            name: str
-    ) -> Artifact | None:
+    def get_artifact(self, name: str):
+        """Resolve a named value source; missing names raise KeyError."""
         return self.artifact_store.get(name)
 
-    def get_artifact_value(
-            self,
-            name: str
-    ) -> Artifact | None:
-        a = self.artifact_store.get(name)
-        return a.value() if a else None
+    def get_artifact_value(self, name: str):
+        return self.artifact_store.get(name)
 
-    def get_artifact_item(
-            self,
-            name: str
-    ) -> Artifact | None:
-        a = self.artifact_store.get(name)
-        return a.item() if a else None
+    def get_artifact_item(self, name: str):
+        return self.artifact_store.item(name)
 
-    def register_artifacts(
-            self,
-            artifact: Artifact,
-    ) -> None:
-        self.artifact_store.register(artifact)
+    def register_artifacts(self, name: str, source) -> None:
+        self.artifact_store.register(name, source)

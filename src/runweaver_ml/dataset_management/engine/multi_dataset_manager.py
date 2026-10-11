@@ -3,7 +3,6 @@ from torch.utils.data import IterableDataset
 from time import perf_counter
 
 from .layout.dataset_iteration_policy import *
-from runweaver_ml.dataset_management.artifacts import Artifact
 
 class MultiDatasetManager(IterableDataset):
     def __init__(self,
@@ -275,20 +274,11 @@ class MultiDatasetManager(IterableDataset):
 
             The returned object is stored.
 
-        Note:  There are subtle differences between usage
-            3  nearly similar examples 3 entirely different outcomes
-
-                # Shared RNG instance
-                value=random.Random(42)   0
-                    # value stores the result of random(42)
-
-                # Store RNG factory
-                value=lambda ds: random.Random(42)
-                    # value stores  shared  callable fcn reference 1 object
-
-                # Create RNG instance per dataset
-                create=lambda ds: random.Random(42)
-                    # value stores  a new  callable fcn reference for each dataset
+        value=random.Random(42) shares one RNG reference across stores.
+        value=lambda: random.Random(42) shares a parameterless callable source;
+        each store.get(name) invokes it and creates a fresh RNG.
+        create=lambda ds: random.Random(42) constructs one RNG per dataset.
+        Raw sources, including callables, remain accessible through store.item().
 
         """
 
@@ -306,12 +296,7 @@ class MultiDatasetManager(IterableDataset):
                 else value
             )
 
-            ds.artifact_store.register(
-                Artifact(
-                    name=name,
-                    value=obj,
-                )
-            )
+            ds.artifact_store.register(name, obj)
 
     @staticmethod
     def _identity(x):
@@ -325,13 +310,7 @@ class MultiDatasetManager(IterableDataset):
         items = []
 
         for ds in self.datasets:
-            art = ds.artifact_store.get(
-                artifact_name
-            )
-
-            items.append(
-                art.item()
-            )
+            items.append(ds.artifact_store.item(artifact_name))
 
         return (
             items

@@ -3,14 +3,20 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from .artifact import Artifact
-
 
 ARTIFACT_REGISTRY: dict[str, type["BaseArtifact"]] = {}
 
 
-class BaseArtifact(Artifact, ABC):
-    """Configuration-created artifact with automatic type registration."""
+class BaseArtifact(ABC):
+    """Configuration construction record with automatic type registration.
+
+    Dataset stores register source directly; this object is not a runtime wrapper.
+    The value constructor argument is retained for application from_config methods.
+    """
+
+    def __init__(self, name: str, value):
+        self.name = name
+        self.source = value
 
     artifact_name: str | None = None
     requires: list[str] = []
