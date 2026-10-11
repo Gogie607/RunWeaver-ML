@@ -62,6 +62,8 @@ tmp/
 data/
 datasets/
 artifacts/
+!src/runweaver_ml/dataset_management/artifacts/
+!src/runweaver_ml/dataset_management/artifacts/*.py
 checkpoints/
 runs/
 outputs/
@@ -71,4 +73,3 @@ lightning_logs/
 *.pt
 *.pth
 *.onnx
-
